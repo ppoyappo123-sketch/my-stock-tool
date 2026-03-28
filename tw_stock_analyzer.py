@@ -21,8 +21,23 @@ os.environ['PYTHONHTTPSVERIFY'] = '0'
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Referer': 'https://www.twse.com.tw/'
+    'Referer': 'https://www.twse.com.tw/zh/page/trading/exchange/STOCK_DAY.html'
 }
+
+# --- 2. 核心抓取函式 (具備重試機制) ---
+def fetch_data(url):
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
+            if res.status_code == 200:
+                return res.json()  # 成功取得 JSON
+        except Exception:
+            pass
+        
+        # 失敗了，隨機等待更久再重試
+        time.sleep(random.uniform(5, 10))
+    return None
 
 def safe_float(val):
     if isinstance(val, str):
@@ -43,36 +58,49 @@ if analysis_mode == "個股跨月分析":
     stock_id = st.sidebar.text_input("股票代號", value="2330").strip()
 else:
     st.title("🏛️ 大盤 13:30 成交數據查詢")
-    st.info("提示：此模式將抓取上市大盤總成交資訊")
     stock_id = None
 
 start_date = st.sidebar.date_input("開始日期", value=datetime(2025, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.today())
 
 if st.sidebar.button("🔍 執行分析"):
-    with st.spinner('正在連線證交所，請稍候...'):
+    with st.spinner('正在排隊與證交所建立安全連線...'):
         try:
             all_data = []
             temp_date = start_date.replace(day=1)
 
-            # --- 模式 A: 個股分析 ---
-            if analysis_mode == "個股跨月分析":
-                while temp_date <= end_date.replace(day=1):
+            while temp_date <= end_date.replace(day=1):
+                if analysis_mode == "個股跨月分析":
                     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
-                    res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
-                    data = res.json()
-                    if data.get('stat') == 'OK':
-                        for r in data['data']:
+                else:
+                    url = f"https://www.twse.com.tw/indicesReport/FMTQIK?response=json&date={temp_date.strftime('%Y%m%d')}"
+                
+                data = fetch_data(url)
+                
+                if data and data.get('stat') == 'OK':
+                    for r in data['data']:
+                        if analysis_mode == "個股跨月分析":
                             all_data.append({
                                 '交易日期': r[0], 'capacity': safe_float(r[1]), 'turnover': safe_float(r[2]), 
                                 '開盤': safe_float(r[3]), '最高': safe_float(r[4]), '最低': safe_float(r[5]), 
                                 '收盤': safe_float(r[6]), '漲跌': r[7]
                             })
-                    temp_date += relativedelta(months=1)
-                    time.sleep(random.uniform(2, 4)) 
+                        else:
+                            all_data.append({
+                                '交易日期': row[0],
+                                '大盤1330金額(億)': round(safe_float(row[2]) / 100000000, 2),
+                                '大盤1330量(萬張)': round(safe_float(row[1]) / 10000000, 2)
+                            })
+                
+                temp_date += relativedelta(months=1)
+                time.sleep(random.uniform(3, 7)) # 增加月份間的等待
 
-                if all_data:
-                    df = pd.DataFrame(all_data)
+            if not all_data:
+                st.error("❌ 證交所拒絕連線或查無資料，請稍後幾分鐘再試。")
+            else:
+                df = pd.DataFrame(all_data)
+                if analysis_mode == "個股跨月分析":
+                    # 個股邏輯與排版 (圖2效果)
                     df['成交量(張)'] = (df['capacity'] / 1000).astype(int)
                     df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
                     formula_label = "成交金額/(最高-最低)/1億"
@@ -83,7 +111,6 @@ if st.sidebar.button("🔍 執行分析"):
                     threshold = avg_val * 3
                     df['3倍異常'] = df[formula_label] > threshold
 
-                    # 復刻圖 2 看板
                     st.markdown("---")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("區間平均指標", f"{avg_val:.10f}")
@@ -97,28 +124,8 @@ if st.sidebar.button("🔍 執行分析"):
                         .format({'開盤': '{:.2f}', '最高': '{:.2f}', '最低': '{:.2f}', '收盤': '{:.2f}', '成交金額(億元)': '{:.2f}', formula_label: '{:.10f}', res_label: '{:.2f}'}),
                         use_container_width=True
                     )
-
-            # --- 模式 B: 大盤查詢 (已更新超時邏輯) ---
-            else:
-                while temp_date <= end_date.replace(day=1):
-                    url = f"https://www.twse.com.tw/indicesReport/FMTQIK?response=json&date={temp_date.strftime('%Y%m%d')}"
-                    res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
-                    data = res.json()
-                    if data.get('stat') == 'OK':
-                        for row in data['data']:
-                            all_data.append({
-                                '交易日期': row[0],
-                                '大盤1330金額(億)': round(safe_float(row[2]) / 100000000, 2),
-                                '大盤1330量(萬張)': round(safe_float(row[1]) / 10000000, 2)
-                            })
-                    temp_date += relativedelta(months=1)
-                    time.sleep(random.uniform(2, 4))
-                
-                if all_data:
-                    st.subheader(f"📅 大盤數據：{start_date} 至 {end_date}")
-                    st.dataframe(pd.DataFrame(all_data), use_container_width=True)
                 else:
-                    st.error("連線證交所大盤 API 失敗")
+                    st.dataframe(df, use_container_width=True)
 
         except Exception as e:
-            st.error(f"連線超時或失敗：{str(e)}")
+            st.error(f"分析失敗：{str(e)}")
