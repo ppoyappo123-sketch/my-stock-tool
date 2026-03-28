@@ -8,7 +8,7 @@ import urllib3
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 終極 SSL 與連線警告屏蔽 ---
+# --- 1. SSL 與連線警告屏蔽 ---
 try:
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,6 +21,15 @@ os.environ['PYTHONHTTPSVERIFY'] = '0'
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
+
+# 輔助函式：安全轉換數字 (處理逗號問題)
+def safe_float(val):
+    if isinstance(val, str):
+        val = val.replace(',', '').replace('--', '0') # 處理逗號與停券/無成交
+    try:
+        return float(val)
+    except:
+        return 0.0
 
 # 頁面基礎設定
 st.set_page_config(page_title="台股跨月分析工具", layout="wide")
@@ -39,15 +48,6 @@ else:
 start_date = st.sidebar.date_input("開始日期", value=datetime(2025, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.today())
 
-# --- 輔助函式：安全轉換數字 (處理逗號問題) ---
-def safe_float(val):
-    if isinstance(val, str):
-        val = val.replace(',', '').replace('--', '0') # 處理逗號與停券/無成交
-    try:
-        return float(val)
-    except:
-        return 0.0
-
 # 執行分析
 if st.sidebar.button("🔍 執行分析"):
     with st.spinner('正在與證交所連線並處理數據格式...'):
@@ -64,7 +64,6 @@ if st.sidebar.button("🔍 執行分析"):
                     
                     if data.get('stat') == 'OK':
                         for r in data['data']:
-                            # 關鍵修正：使用 safe_float 處理所有帶逗號的數字
                             all_data.append({
                                 'date': r[0], 
                                 'capacity': safe_float(r[1]),
@@ -82,19 +81,61 @@ if st.sidebar.button("🔍 執行分析"):
                     st.error("❌ 抓取失敗。請檢查代號或稍後再試。")
                 else:
                     df = pd.DataFrame(all_data)
-                    # 計算邏輯
+                    
+                    # 1. 數據換算
                     df['成交量(張)'] = (df['capacity'] / 1000).astype(int)
                     df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
                     
-                    # 計算指標：成交金額(億) / (最高-最低) / 1億
-                    # 這裡公式調整回你要求的格式
-                    df['指標結果(x1億)'] = df.apply(lambda r: (r['成交金額(億元)'] / (r['high'] - r['low'])) if (r['high'] - r['low']) > 0 else 0, axis=1)
+                    # 2. 計算中間公式欄位
+                    formula_label = "成交金額/(最高-最低)/1億"
+                    df[formula_label] = df.apply(lambda r: (r['turnover'] / 100000000 / (r['high'] - r['low'])) / 100000000 if (r['high'] - r['low']) > 0 else 0, axis=1)
                     
-                    df['3倍異常'] = df['指標結果(x1億)'] > (df['指標結果(x1億)'].mean() * 3)
+                    # 3. 計算指標結果 (乘回 1 億顯示小數兩位)
+                    res_label = "指標結果(x1億)"
+                    df[res_label] = (df[formula_label] * 100000000).round(2)
                     
-                    st.dataframe(df.rename(columns={'date':'交易日期'}), use_container_width=True)
+                    # 4. 異常判斷
+                    avg_val = df[formula_label].mean()
+                    threshold = avg_val * 3
+                    df['3倍異常'] = df[formula_label] > threshold
 
-            # --- 模式 B: 大盤查詢 ---
+                    # ---看板呈現 (復刻圖2頂部) ---
+                    st.markdown("---")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("區間平均指標", f"{avg_val:.10f}")
+                    c2.metric("3倍異常門檻", f"{threshold:.10f}")
+                    c3.metric("資料總天數", len(df))
+                    st.markdown("---")
+
+                    # --- 表格顯示 (復刻圖2排版與高亮) ---
+                    # 重新命名欄位
+                    df = df.rename(columns={
+                        'date': '交易日期', 'open': '開盤', 'high': '最高', 
+                        'low': '最低', 'close': '收盤', 'change': '漲跌'
+                    })
+                    
+                    # 選擇顯示欄位順序 (與圖2一致)
+                    display_cols = [
+                        '交易日期', '開盤', '最高', '最低', '收盤', '漲跌', 
+                        '成交量(張)', '成交金額(億元)', formula_label, res_label, '3倍異常'
+                    ]
+                    
+                    # 定義異常高亮函式 (復刻圖2紅色整列)
+                    def highlight_row(row):
+                        return ['background-color: #fee2e2; color: #b91c1c' if row['3倍異常'] else '' for _ in row]
+
+                    st.dataframe(
+                        df[display_cols].style.apply(highlight_row, axis=1)
+                        .format({
+                            formula_label: '{:.10f}', # 公式顯示 10 位小數
+                            res_label: '{:.2f}',
+                            '成交金額(億元)': '{:.2f}',
+                            '開盤': '{:.2f}', '最高': '{:.2f}', '最低': '{:.2f}', '收盤': '{:.2f}', '漲跌': '{:.2f}'
+                        }),
+                        use_container_width=True
+                    )
+
+            # --- 模式 B: 大盤查詢 (維持不變) ---
             else:
                 while temp_date <= end_date.replace(day=1):
                     url = f"https://www.twse.com.tw/indicesReport/FMTQIK?response=json&date={temp_date.strftime('%Y%m%d')}"
@@ -114,4 +155,4 @@ if st.sidebar.button("🔍 執行分析"):
                     st.dataframe(pd.DataFrame(all_data), use_container_width=True)
 
         except Exception as e:
-            st.error(f"連線失敗：{str(e)}")
+            st.error(f"執行失敗：{str(e)}")
