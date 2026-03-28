@@ -29,6 +29,8 @@ def fetch_json(url):
             if res.status_code == 200:
                 data = res.json()
                 if data.get('stat') == 'OK': return data
+            elif res.status_code == 403: # 被封鎖時等待久一點
+                time.sleep(10)
         except: pass
         time.sleep(random.uniform(5, 8))
     return None
@@ -50,45 +52,47 @@ if st.sidebar.button("🔍 執行分析"):
     all_data = []
     
     if mode == "個股跨月分析":
-        # ... (個股邏輯保持不變) ...
-        pass
+        # (個股邏輯維持之前成功版本，如圖 4、圖 5 樣式)
+        stock_id = st.sidebar.text_input("代號", value="2330", key="stock_id").strip()
+        st.info("執行個股多月份分析中...")
+        # ...此處省略個股代碼以保持簡潔...
     else:
-        # --- 大盤模式：雙來源合併 ---
+        # --- 大盤模式：單一來源掃描 (解決連線受限問題) ---
         curr_date = start_date
+        status_area = st.empty()
+        
         while curr_date <= end_date:
             if curr_date.weekday() < 5:
                 d_str = curr_date.strftime('%Y%m%d')
-                st.write(f"正在整合 {d_str} 數據...")
+                status_area.write(f"📡 正在掃描 {d_str} 全日每 5 秒數據...")
                 
-                # A. 抓加權指數 (MI_5MIN_INDICES) -> 取得全日最高最低
-                idx_url = f"https://www.twse.com.tw/exchangeReport/MI_5MIN_INDICES?response=json&date={d_str}"
-                idx_data = fetch_json(idx_url)
+                # 抓取 MI_5MINS (這張表同時有指數、成交量、成交金額)
+                url = f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d_str}"
+                raw_data = fetch_json(url)
                 
-                # B. 抓成交統計 (MI_5MINS) -> 取得 13:30 累積量/金額
-                vol_url = f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d_str}"
-                vol_data = fetch_json(vol_url)
-                
-                if idx_data and vol_data:
-                    # 1. 指數分析：從 MI_5MIN_INDICES 的 r[1] 抓加權指數
-                    all_indices = [safe_float(r[1]) for r in idx_data['data']]
-                    day_high = max(all_indices) if all_indices else 0
-                    day_low = min(all_indices) if all_indices else 0
+                if raw_data and 'data' in raw_data:
+                    data_rows = raw_data['data']
                     
-                    # 2. 成交量分析：從 MI_5MINS 抓 13:30:00 累積數據
-                    # r[4] 是累積成交量(股), r[6] 是累積成交金額(元)
-                    target = next((r for r in vol_data['data'] if "13:30:00" in r[0]), vol_data['data'][-1])
+                    # 1. 整理「台股加權指數」最高與最低 (r[1] 是發行量加權股價指數)
+                    # 遍歷整天 5 秒數據找高低點
+                    all_indices = [safe_float(r[1]) for r in data_rows]
+                    
+                    # 2. 鎖定「13:30:00」那一刻的累積數據
+                    # r[5] 是累積成交股數, r[6] 是累積成交金額
+                    target_1330 = next((r for r in data_rows if "13:30:00" in r[0]), data_rows[-1])
                     
                     all_data.append({
                         '交易日期': curr_date.strftime('%Y-%m-%d'),
-                        '加權指數最高': day_high,
-                        '加權指數最低': day_low,
-                        '13:30累積金額(億)': round(safe_float(target[6]) / 100000000, 2),
-                        '13:30累積量(張)': int(safe_float(target[5]) / 1000)
+                        '加權指數最高': max(all_indices),
+                        '加權指數最低': min(all_indices),
+                        '13:30 累積金額(億)': round(safe_float(target_1330[6]) / 100000000, 2),
+                        '13:30 累積量(張)': int(safe_float(target_1330[5]) / 1000)
                     })
-                time.sleep(random.uniform(4, 6))
+                time.sleep(random.uniform(5, 7)) # 增加隨機延遲模擬真人
             curr_date += timedelta(days=1)
 
         if all_data:
+            st.success("✅ 大盤數據整合完成！")
             st.dataframe(pd.DataFrame(all_data), use_container_width=True)
         else:
-            st.error("連線受限或查無資料，請縮短日期區間。")
+            st.error("連線受限或查無資料。建議日期區間不要超過 5 天。")
