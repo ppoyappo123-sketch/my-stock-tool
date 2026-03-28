@@ -3,24 +3,24 @@ import twstock
 import pandas as pd
 import ssl
 import os
+import requests
+import time
 import urllib3
+# --- 關鍵修正：匯入 datetime ---
+from datetime import datetime 
+from dateutil.relativedelta import relativedelta
 
-# --- 針對雲端環境的 SSL 強化 (解決 image_7cbac6 的連線問題) ---
+# --- SSL 雲端防護 ---
 try:
-    # 建立一個不檢查憑證的 SSL 上下文
     ssl._create_default_https_context = ssl._create_unverified_context
-    # 關閉 urllib3 的警告訊息
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except Exception:
     pass
 
-# 強制設定環境變數，叫 Python 不要去查本機證書
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
-# 設定環境變數強制跳過憑證檢查
-os.environ['CURL_CA_BUNDLE'] = ''
-os.environ['PYTHONHTTPSVERIFY'] = '0'
+# ... 後面維持不變 ...
 
 # 2. 頁面基礎設定
 st.set_page_config(page_title="台股跨月分析工具", layout="wide")
