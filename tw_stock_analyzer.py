@@ -3,16 +3,20 @@ import twstock
 import pandas as pd
 import ssl
 import os
-import requests
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
+import urllib3
 
-# --- 1. 終極 SSL 修復：針對 image_f631b5/image_f63579 的報錯 ---
-# 禁用全域 SSL 驗證
+# --- 針對雲端環境的 SSL 強化 (解決 image_7cbac6 的連線問題) ---
 try:
+    # 建立一個不檢查憑證的 SSL 上下文
     ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
+    # 關閉 urllib3 的警告訊息
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
     pass
+
+# 強制設定環境變數，叫 Python 不要去查本機證書
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['PYTHONHTTPSVERIFY'] = '0'
 
 # 設定環境變數強制跳過憑證檢查
 os.environ['CURL_CA_BUNDLE'] = ''
