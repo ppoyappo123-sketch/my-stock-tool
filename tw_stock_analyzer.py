@@ -9,7 +9,7 @@ import random
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 基礎環境設定 ---
+# --- 1. 基礎連線防護 ---
 try:
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,22 +21,21 @@ os.environ['PYTHONHTTPSVERIFY'] = '0'
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Referer': 'https://www.twse.com.tw/zh/page/trading/exchange/STOCK_DAY.html'
+    'Referer': 'https://www.twse.com.tw/'
 }
 
-# --- 2. 核心抓取函式 (具備重試機制) ---
-def fetch_data(url):
-    max_retries = 3
-    for i in range(max_retries):
+# --- 2. 核心抓取函式 (強化大盤穩定度) ---
+def fetch_json(url):
+    for i in range(3): # 自動重試 3 次
         try:
             res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
             if res.status_code == 200:
-                return res.json()  # 成功取得 JSON
+                content = res.json()
+                if content and content.get('stat') == 'OK':
+                    return content
         except Exception:
             pass
-        
-        # 失敗了，隨機等待更久再重試
-        time.sleep(random.uniform(5, 10))
+        time.sleep(random.uniform(5, 8)) # 失敗時蹲久一點再試
     return None
 
 def safe_float(val):
@@ -48,7 +47,7 @@ def safe_float(val):
         return 0.0
 
 # 頁面配置
-st.set_page_config(page_title="台股跨月分析工具", layout="wide")
+st.set_page_config(page_title="台股分析工具", layout="wide")
 
 st.sidebar.header("功能設定")
 analysis_mode = st.sidebar.selectbox("選擇模式", ["個股跨月分析", "大盤數據查詢"])
@@ -64,7 +63,7 @@ start_date = st.sidebar.date_input("開始日期", value=datetime(2025, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.today())
 
 if st.sidebar.button("🔍 執行分析"):
-    with st.spinner('正在排隊與證交所建立安全連線...'):
+    with st.spinner('正在與證交所建立安全通道，請稍候...'):
         try:
             all_data = []
             temp_date = start_date.replace(day=1)
@@ -73,12 +72,13 @@ if st.sidebar.button("🔍 執行分析"):
                 if analysis_mode == "個股跨月分析":
                     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
                 else:
+                    # 大盤 API 路徑
                     url = f"https://www.twse.com.tw/indicesReport/FMTQIK?response=json&date={temp_date.strftime('%Y%m%d')}"
                 
-                data = fetch_data(url)
+                raw_json = fetch_json(url)
                 
-                if data and data.get('stat') == 'OK':
-                    for r in data['data']:
+                if raw_json:
+                    for r in raw_json['data']:
                         if analysis_mode == "個股跨月分析":
                             all_data.append({
                                 '交易日期': r[0], 'capacity': safe_float(r[1]), 'turnover': safe_float(r[2]), 
@@ -86,21 +86,22 @@ if st.sidebar.button("🔍 執行分析"):
                                 '收盤': safe_float(r[6]), '漲跌': r[7]
                             })
                         else:
+                            # 大盤欄位對應修正 (r[1]是成交股數, r[2]是成交金額)
                             all_data.append({
-                                '交易日期': row[0],
-                                '大盤1330金額(億)': round(safe_float(row[2]) / 100000000, 2),
-                                '大盤1330量(萬張)': round(safe_float(row[1]) / 10000000, 2)
+                                '交易日期': r[0],
+                                '大盤1330金額(億)': round(safe_float(r[2]) / 100000000, 2),
+                                '大盤1330量(萬張)': round(safe_float(r[1]) / 10000000, 2)
                             })
                 
                 temp_date += relativedelta(months=1)
-                time.sleep(random.uniform(3, 7)) # 增加月份間的等待
+                time.sleep(random.uniform(4, 6))
 
             if not all_data:
-                st.error("❌ 證交所拒絕連線或查無資料，請稍後幾分鐘再試。")
+                st.error("❌ 證交所拒絕連線或該區間無數據。請稍候 10 分鐘再嘗試。")
             else:
                 df = pd.DataFrame(all_data)
                 if analysis_mode == "個股跨月分析":
-                    # 個股邏輯與排版 (圖2效果)
+                    # --- 個股樣式 (復刻圖2) ---
                     df['成交量(張)'] = (df['capacity'] / 1000).astype(int)
                     df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
                     formula_label = "成交金額/(最高-最低)/1億"
@@ -125,6 +126,8 @@ if st.sidebar.button("🔍 執行分析"):
                         use_container_width=True
                     )
                 else:
+                    # --- 大盤樣式 ---
+                    st.subheader(f"📊 大盤成交統計 ({start_date} ~ {end_date})")
                     st.dataframe(df, use_container_width=True)
 
         except Exception as e:
