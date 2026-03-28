@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import random
 import ssl
 import urllib3
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 環境初始化 ---
+# --- 1. 連線基礎設定 ---
 try:
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -16,9 +15,25 @@ except:
     pass
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Referer': 'https://www.twse.com.tw/'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
+
+def get_yahoo_indices_v2(query_date):
+    """ 使用 Yahoo Chart API 抓取單日高低點 (比 CSV 下載更穩定) """
+    # 轉換為 Unix 時間戳
+    start_ts = int(time.mktime(query_date.timetuple()))
+    end_ts = start_ts + 86400 
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/^TWII?period1={start_ts}&period2={end_ts}&interval=1d"
+    
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        data = res.json()
+        result = data['chart']['result'][0]
+        high = result['indicators']['quote'][0]['high'][0]
+        low = result['indicators']['quote'][0]['low'][0]
+        return {'high': round(high, 2), 'low': round(low, 2)}
+    except:
+        return None
 
 def fetch_twse_json(url):
     try:
@@ -26,23 +41,6 @@ def fetch_twse_json(url):
         if res.status_code == 200:
             data = res.json()
             if data.get('stat') == 'OK': return data
-    except:
-        pass
-    return None
-
-def get_yahoo_day_data(query_date):
-    """ 從 Yahoo Finance 抓取單日加權指數高低點 """
-    # 設定時間戳記 (需包含前後範圍以確保抓到該日)
-    p1 = int(time.mktime(query_date.timetuple()))
-    p2 = int(time.mktime((query_date + timedelta(days=1)).timetuple()))
-    url = f"https://query1.finance.yahoo.com/v7/finance/download/^TWII?period1={p1}&period2={p2}&interval=1d&events=history"
-    try:
-        df = pd.read_csv(url)
-        if not df.empty:
-            return {
-                'high': round(df['High'].iloc[0], 2),
-                'low': round(df['Low'].iloc[0], 2)
-            }
     except:
         pass
     return None
@@ -61,14 +59,15 @@ mode = st.sidebar.selectbox("模式選擇", ["大盤單日精確查詢", "個股
 
 if mode == "大盤單日精確查詢":
     st.title("🏛️ 大盤單日數據 (Yahoo 指數 + 證交所成交量)")
+    # 預設選昨天 (避免當天尚未收盤導致抓不到)
     query_date = st.date_input("選擇查詢日期", value=datetime.today() - timedelta(days=1))
     
     if st.button("🔍 執行查詢"):
-        with st.spinner('同步 Yahoo 與 證交所數據中...'):
+        with st.spinner('連線中...'):
             # 1. 抓 Yahoo 加權指數
-            y_data = get_yahoo_day_data(query_date)
+            y_data = get_yahoo_indices_v2(query_date)
             
-            # 2. 抓證交所成交量 (MI_5MINS)
+            # 2. 抓證交所成交量
             d_str = query_date.strftime('%Y%m%d')
             vol_url = f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d_str}"
             vol_data = fetch_twse_json(vol_url)
@@ -87,10 +86,10 @@ if mode == "大盤單日精確查詢":
                 st.success("數據獲取成功！")
                 st.table(res_df)
             else:
-                st.error("無法取得完整數據。請確認該日是否為交易日。")
+                st.error("無法取得數據。請檢查：1.該日是否為交易日 2.證交所是否暫時封鎖 IP (請等5分鐘再試)。")
 
 else:
-    # --- 模式：個股跨月分析 ---
+    # --- 模式：個股跨月分析 (維持原本代碼) ---
     st.title("📈 個股跨月異常分析")
     col1, col2, col3 = st.columns(3)
     with col1:
