@@ -5,6 +5,7 @@ import os
 import requests
 import time
 import urllib3
+import random
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -17,7 +18,13 @@ except:
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+# --- 2. 模擬真人瀏覽器 Headers ---
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://www.twse.com.tw/zh/page/trading/exchange/STOCK_DAY.html'
+}
 
 def safe_float(val):
     if isinstance(val, str):
@@ -43,7 +50,7 @@ start_date = st.sidebar.date_input("開始日期", value=datetime(2025, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.today())
 
 if st.sidebar.button("🔍 執行分析"):
-    with st.spinner('正在處理數據...'):
+    with st.spinner('正在從證交所排隊抓取數據，請耐心稍候...'):
         try:
             all_data = []
             temp_date = start_date.replace(day=1)
@@ -51,8 +58,11 @@ if st.sidebar.button("🔍 執行分析"):
             if analysis_mode == "個股跨月分析":
                 while temp_date <= end_date.replace(day=1):
                     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
-                    res = requests.get(url, headers=HEADERS, verify=False, timeout=10)
+                    
+                    # 修正：增加 timeout 到 30 秒，並加入重試邏輯
+                    res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
                     data = res.json()
+                    
                     if data.get('stat') == 'OK':
                         for r in data['data']:
                             all_data.append({
@@ -63,13 +73,15 @@ if st.sidebar.button("🔍 執行分析"):
                                 '最高': safe_float(r[4]), 
                                 '最低': safe_float(r[5]), 
                                 '收盤': safe_float(r[6]),
-                                '漲跌': r[7] # 漲跌維持字串以保留正負號
+                                '漲跌': r[7]
                             })
+                    
                     temp_date += relativedelta(months=1)
-                    time.sleep(2) 
+                    # 修正：隨機等待 3~5 秒，避免被證交所視為攻擊
+                    time.sleep(random.uniform(3, 5)) 
 
                 if not all_data:
-                    st.error("❌ 抓取失敗。")
+                    st.error("❌ 抓取失敗，證交所目前可能繁忙中。")
                 else:
                     df = pd.DataFrame(all_data)
                     df['成交量(張)'] = (df['capacity'] / 1000).astype(int)
@@ -85,7 +97,7 @@ if st.sidebar.button("🔍 執行分析"):
                     threshold = avg_val * 3
                     df['3倍異常'] = df[formula_label] > threshold
 
-                    # --- 看板呈現 (復刻圖2) ---
+                    # 看板 (圖2排版)
                     st.markdown("---")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("區間平均指標", f"{avg_val:.10f}")
@@ -95,7 +107,7 @@ if st.sidebar.button("🔍 執行分析"):
 
                     display_cols = ['交易日期', '開盤', '最高', '最低', '收盤', '漲跌', '成交量(張)', '成交金額(億元)', formula_label, res_label, '3倍異常']
                     
-                    # 修正格式化：只針對數字欄位，避開字串欄位 '漲跌'
+                    # 異常紅字高亮 (圖2效果)
                     st.dataframe(
                         df[display_cols].style.apply(lambda row: ['background-color: #fee2e2; color: #b91c1c' if row['3倍異常'] else '' for _ in row], axis=1)
                         .format({
@@ -104,9 +116,8 @@ if st.sidebar.button("🔍 執行分析"):
                         }),
                         use_container_width=True
                     )
-
-            else: # 大盤模式
-                # ... 大盤邏輯維持原樣 ...
-                st.info("大盤模式執行中...")
+            else:
+                st.info("大盤模式尚未更新超時邏輯，請先測試個股模式。")
         except Exception as e:
-            st.error(f"執行失敗：{str(e)}")
+            st.error(f"連線超時或失敗：{str(e)}")
+            st.warning("💡 建議：縮短查詢日期區間（例如只查 1 個月）再試一次。")
