@@ -20,12 +20,29 @@ HEADERS = {
     'Referer': 'https://www.twse.com.tw/'
 }
 
-def fetch_json(url):
+def fetch_twse_json(url):
     try:
-        res = requests.get(url, headers=HEADERS, verify=False, timeout=20)
+        res = requests.get(url, headers=HEADERS, verify=False, timeout=15)
         if res.status_code == 200:
             data = res.json()
             if data.get('stat') == 'OK': return data
+    except:
+        pass
+    return None
+
+def get_yahoo_day_data(query_date):
+    """ 從 Yahoo Finance 抓取單日加權指數高低點 """
+    # 設定時間戳記 (需包含前後範圍以確保抓到該日)
+    p1 = int(time.mktime(query_date.timetuple()))
+    p2 = int(time.mktime((query_date + timedelta(days=1)).timetuple()))
+    url = f"https://query1.finance.yahoo.com/v7/finance/download/^TWII?period1={p1}&period2={p2}&interval=1d&events=history"
+    try:
+        df = pd.read_csv(url)
+        if not df.empty:
+            return {
+                'high': round(df['High'].iloc[0], 2),
+                'low': round(df['Low'].iloc[0], 2)
+            }
     except:
         pass
     return None
@@ -37,49 +54,43 @@ def safe_float(val):
     except: return 0.0
 
 # --- 2. Streamlit 介面 ---
-st.set_page_config(page_title="台股分析精準版", layout="wide")
+st.set_page_config(page_title="台股混合查詢工具", layout="wide")
 
 st.sidebar.header("功能切換")
 mode = st.sidebar.selectbox("模式選擇", ["大盤單日精確查詢", "個股跨月異常分析"])
 
 if mode == "大盤單日精確查詢":
-    st.title("🏛️ 大盤單日數據掃描")
-    st.info("此模式會同時對接「加權指數專表」與「成交統計表」，抓取最精確的數據。")
-    
+    st.title("🏛️ 大盤單日數據 (Yahoo 指數 + 證交所成交量)")
     query_date = st.date_input("選擇查詢日期", value=datetime.today() - timedelta(days=1))
     
-    if st.button("🔍 執行單日分析"):
-        d_str = query_date.strftime('%Y%m%d')
-        
-        with st.spinner(f'正在分析 {query_date.strftime("%Y-%m-%d")} 數據...'):
-            # A. 抓加權指數專表 (MI_5MIN_INDICES) -> 找最高最低
-            idx_url = f"https://www.twse.com.tw/exchangeReport/MI_5MIN_INDICES?response=json&date={d_str}"
-            idx_data = fetch_json(idx_url)
+    if st.button("🔍 執行查詢"):
+        with st.spinner('同步 Yahoo 與 證交所數據中...'):
+            # 1. 抓 Yahoo 加權指數
+            y_data = get_yahoo_day_data(query_date)
             
-            # B. 抓成交統計表 (MI_5MINS) -> 找 13:30 累積量
+            # 2. 抓證交所成交量 (MI_5MINS)
+            d_str = query_date.strftime('%Y%m%d')
             vol_url = f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d_str}"
-            vol_data = fetch_json(vol_url)
+            vol_data = fetch_twse_json(vol_url)
             
-            if idx_data and vol_data:
-                # 指數掃描 (索引 1 是發行量加權股價指數)
-                indices = [safe_float(r[1]) for r in idx_data['data']]
-                # 成交量掃描 (索引 5 數量, 索引 6 金額)
+            if y_data and vol_data:
+                # 尋找 13:30:00 累積量
                 target_1330 = next((r for r in vol_data['data'] if "13:30:00" in r[0]), vol_data['data'][-1])
                 
                 res_df = pd.DataFrame([{
-                    '查詢日期': query_date.strftime('%Y-%m-%d'),
-                    '加權指數最高': max(indices),
-                    '加權指數最低': min(indices),
-                    '13:30 累積成交數量(股)': target_1330[5],
-                    '13:30 累積成交金額(百萬元)': target_1330[6]
+                    '日期': query_date.strftime('%Y-%m-%d'),
+                    '加權最高 (Yahoo)': y_data['high'],
+                    '加權最低 (Yahoo)': y_data['low'],
+                    '13:30 累積數量 (股)': target_1330[5],
+                    '13:30 累積金額 (百萬元)': target_1330[6]
                 }])
-                st.success("數據抓取成功！")
-                st.table(res_df) # 單日數據用 table 顯示更清楚
+                st.success("數據獲取成功！")
+                st.table(res_df)
             else:
-                st.error("無法取得當日數據。可能是假日、尚未收盤，或連線受限。")
+                st.error("無法取得完整數據。請確認該日是否為交易日。")
 
 else:
-    # --- 模式：個股跨月分析 (維持原樣) ---
+    # --- 模式：個股跨月分析 ---
     st.title("📈 個股跨月異常分析")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -93,10 +104,9 @@ else:
         all_stock_data = []
         temp_date = start_date.replace(day=1)
         
-        progress = st.progress(0)
         while temp_date <= end_date.replace(day=1):
             url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
-            data = fetch_json(url)
+            data = fetch_twse_json(url)
             if data:
                 for r in data['data']:
                     all_stock_data.append({
@@ -105,7 +115,7 @@ else:
                         '收盤': safe_float(r[6]), '成交量(張)': int(safe_float(r[1])/1000)
                     })
             temp_date += relativedelta(months=1)
-            time.sleep(2) # 個股跨月連線需禮貌間隔
+            time.sleep(2)
             
         if all_stock_data:
             df = pd.DataFrame(all_stock_data)
@@ -114,7 +124,4 @@ else:
             df[formula_label] = df.apply(lambda r: (r['turnover'] / 100000000 / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
             avg_val = df[formula_label].mean()
             df['3倍異常'] = df[formula_label] > (avg_val * 3)
-            
             st.dataframe(df.style.apply(lambda row: ['background-color: #fee2e2' if row['3倍異常'] else '' for _ in row], axis=1), use_container_width=True)
-        else:
-            st.error("查無個股資料，請檢查代號或日期。")
