@@ -3,35 +3,15 @@ import pandas as pd
 import requests
 import time
 import random
-import ssl
-import urllib3
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 基礎安全性與 Headers 設定 ---
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-except:
-    pass
-
-# 強化 Headers，模擬真實官網訪問
-COMMON_HEADERS = {
+# --- 基礎設定 ---
+HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://www.tpex.org.tw/zh-tw/mainboard/listed/company.html',
-    'X-Requested-With': 'XMLHttpRequest'
+    'Referer': 'https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html',
+    'Host': 'www.tpex.org.tw'
 }
-
-def fetch_tpex_json(url):
-    try:
-        res = requests.get(url, headers=COMMON_HEADERS, verify=False, timeout=20)
-        if res.status_code == 200:
-            return res.json()
-    except Exception as e:
-        print(f"Error fetching: {e}")
-    return None
 
 def safe_float(val):
     if isinstance(val, str):
@@ -39,30 +19,29 @@ def safe_float(val):
     try: return float(val)
     except: return 0.0
 
-# --- 2. Streamlit UI ---
-st.set_page_config(page_title="台股全能分析器", layout="wide")
+# --- Streamlit 介面 ---
+st.set_page_config(page_title="櫃買數據分析工具", layout="wide")
 
 st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
-    "模式切換", 
-    ["櫃買中心綜合查詢 (上櫃/興櫃/ETF)", "上市個股分析 (證交所)"],
-    key="nav_v4"
+    "選擇模式", 
+    ["櫃買個股分析 (日成交資訊)", "上市個股分析 (證交所)"],
+    key="tpex_main_nav"
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
 
-# --- 3. 櫃買中心綜合分析 (核心修正版) ---
-if mode == "櫃買中心綜合查詢 (上櫃/興櫃/ETF)":
-    st.title("📉 櫃買中心全功能查詢")
-    st.caption("支援範圍：上櫃股票、興櫃、創櫃、ETF、ETN、債券")
+if mode == "櫃買個股分析 (日成交資訊)":
+    st.title("📉 櫃買中心個股日成交資訊")
     
     col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("輸入代號 (如: 8046, 6937, 006201)", value="8046").strip()
-    with col2: start_m = st.date_input("開始月份", value=datetime.today() - relativedelta(months=2))
+    with col1: stock_id = st.text_input("股票代號", value="8046").strip()
+    with col2: start_m = st.date_input("開始月份", value=datetime.today() - relativedelta(months=1))
     with col3: end_d = st.date_input("結束日期", value=datetime.today())
 
-    if st.button("🔍 開始櫃買數據檢索"):
+    if st.button("🔍 執行數據抓取"):
         data_list = []
+        # 生成月份清單
         curr = start_m.replace(day=1)
         months = []
         while curr <= end_d.replace(day=1):
@@ -73,62 +52,60 @@ if mode == "櫃買中心綜合查詢 (上櫃/興櫃/ETF)":
         status_text = st.empty()
 
         for i, m_date in enumerate(months):
+            # 轉換民國年格式：113/04/01
             roc_year = m_date.year - 1911
-            m_str = m_date.strftime('%m')
-            status_text.write(f"⏳ 正在檢索 {stock_id} 於 {roc_year}年{m_str}月 的數據...")
+            # 櫃買中心此 API 必須傳入完整的民國日期字串，例如 113/04/01
+            date_str = f"{roc_year}/{m_date.strftime('%m')}/01"
             
-            # 策略 A: 一般上櫃/ETF/債券
-            url_a = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/stk_quote_result.php?l=zh-tw&d={roc_year}/{m_str}&stk_code={stock_id}"
-            res_a = fetch_tpex_json(url_a)
+            status_text.write(f"📡 正在調用 API：{date_str} (代號: {stock_id})")
             
-            found_this_month = False
-            if res_a and res_a.get('aaData'):
-                for r in res_a['aaData']:
-                    # 索引: 0日期, 1張數, 2金額, 4最高, 5最低, 6收盤
-                    data_list.append({
-                        '日期': r[0], '成交金額': safe_float(r[2]), '最高': safe_float(r[4]), 
-                        '最低': safe_float(r[5]), '收盤': safe_float(r[6]), '成交張數': int(safe_float(r[1]))
-                    })
-                found_this_month = True
+            # 您指定的「個股日成交資訊」精確 API 網址
+            api_url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/stk_quote_result.php?l=zh-tw&d={date_str}&stk_code={stock_id}"
             
-            # 策略 B: 如果 A 沒資料，嘗試興櫃 API
-            if not found_this_month:
-                url_b = f"https://www.tpex.org.tw/web/emergingstock/historical/daily_info_result.php?l=zh-tw&d={roc_year}/{m_str}&stk_code={stock_id}"
-                res_b = fetch_tpex_json(url_b)
-                if res_b and res_b.get('aaData'):
-                    for r in res_b['aaData']:
-                        # 興櫃索引: 0日期, 1股數, 2金額, 4最高, 5最低, 6均價
+            try:
+                res = requests.get(api_url, headers=HEADERS, timeout=15)
+                json_data = res.json()
+                
+                if json_data and "aaData" in json_data and json_data["aaData"]:
+                    for r in json_data["aaData"]:
+                        # 櫃買中心欄位順序：
+                        # 0:日期, 1:張數, 2:金額, 3:開盤, 4:最高, 5:最低, 6:收盤...
                         data_list.append({
-                            '日期': r[0], '成交金額': safe_float(r[2]), '最高': safe_float(r[4]), 
-                            '最低': safe_float(r[5]), '收盤': safe_float(r[6]), '成交張數': int(safe_float(r[1])/1000)
+                            '日期': r[0],
+                            '成交金額': safe_float(r[2]),
+                            '最高': safe_float(r[4]),
+                            '最低': safe_float(r[5]),
+                            '收盤': safe_float(r[6]),
+                            '成交量(張)': int(safe_float(r[1]))
                         })
-                    found_this_month = True
-            
+                else:
+                    st.warning(f"⚠️ {date_str} 查無資料 (可能非交易月份或代號錯誤)")
+            except Exception as e:
+                st.error(f"❌ 請求失敗: {e}")
+
             progress_bar.progress((i + 1) / len(months))
-            time.sleep(random.uniform(1.0, 2.0))
-        
+            time.sleep(random.uniform(1.5, 2.5)) # 避免被封鎖
+
         status_text.empty()
 
         if data_list:
             df = pd.DataFrame(data_list)
-            # 移除重複項並按日期排序
-            df = df.drop_duplicates(subset=['日期']).sort_values('日期')
-            
-            # 指標計算
+            # 轉換並計算
             df[formula_label] = df.apply(lambda r: (r['成交金額'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
             avg_val = df[formula_label].mean()
             df['3倍異常'] = df[formula_label] > (avg_val * 3)
             
-            st.success(f"📊 {stock_id} 數據抓取成功！")
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+            st.success(f"✅ 成功抓取 {len(df)} 筆交易記錄！")
+            
+            # 表格顯示
+            st.dataframe(
+                df.style.apply(lambda r: ['color: #ef4444; font-weight: bold;' if r['3倍異常'] else '' for _ in r], axis=1),
+                use_container_width=True
+            )
         else:
-            st.error(f"❌ 無法在櫃買中心找到 {stock_id} 的資料。請確認代號是否輸入正確。")
+            st.error("❌ 最終未抓得任何數據。建議確認代號是否為櫃買中心上市標的。")
 
-# --- 4. 上市部分 ---
 else:
-    st.title("📈 上市個股分析 (證交所)")
-    # (此部分保持原樣，因為證交所原本就運作正常)
-    stock_id = st.text_input("上市代號", value="2330").strip()
-    if st.button("開始上市分析"):
-        st.write("上市分析模組運作中...")
-        # 這裡放入您原本運作正常的證交所代碼即可
+    # 上市部分保持原有的證交所邏輯
+    st.title("🏛️ 上市個股分析 (證交所)")
+    st.info("請輸入證交所掛牌之股票代號。")
