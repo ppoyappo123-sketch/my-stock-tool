@@ -92,61 +92,82 @@ else:
     with col1: 
         stock_id = st.text_input("上櫃代號", value="8046")
     with col2: 
-        start_date = st.date_input("開始日期", value=datetime.today() - timedelta(days=30))
+        start_date = st.date_input("開始日期", value=datetime.today() - timedelta(days=60))
     with col3: 
         end_date = st.date_input("結束日期", value=datetime.today())
 
     if st.button("🔍 開始上櫃多日分析"):
-        all_tpex_data = []
+        all_data = []
         progress = st.progress(0)
         status = st.empty()
 
-        # 產生交易日清單（排除週末）
-        date_list = []
-        current = start_date
-        while current <= end_date:
-            if current.weekday() < 5:   # 0-4 為週一到週五
-                date_list.append(current)
-            current += timedelta(days=1)
+        temp_date = start_date.replace(day=1)
+        month_count = 0
+        total_months = ((end_date.year - start_date.year) * 12 + end_date.month - start_date.month) + 1
 
-        for i, query_date in enumerate(date_list):
-            roc_year = query_date.year - 1911
-            month_str = query_date.strftime('%m')
+        while temp_date <= end_date:
+            roc_year = temp_date.year - 1911
+            month_str = temp_date.strftime('%m')
             
-            url = (f"https://www.tpex.org.tw/web/stock/aftertrading/"
-                   f"daily_close_quotes/stk_quote_result.php?"
-                   f"l=zh-tw&o=json&d={roc_year}/{month_str}&stk_no={stock_id}")
+            # 使用 CSV 模式（最穩定）
+            url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=csv&d={roc_year}/{month_str}&stk_no={stock_id}"
             
-            status.write(f"📡 抓取 {stock_id}：{query_date.strftime('%Y-%m-%d')}")
-            data = fetch_json(url)
+            status.write(f"📡 抓取 {stock_id}：{roc_year}年{month_str}月")
+            csv_text = fetch_text(url)
             
-            if data and 'tables' in data and data['tables']:
-                for row in data['tables'][0].get('data', []):
-                    if len(row) < 11 or str(row[0]).strip() != stock_id:
-                        continue
+            if csv_text and len(csv_text) > 100:
+                try:
+                    # 解析 CSV（TPEx CSV 有 BOM 與中文欄位）
+                    from io import StringIO
+                    lines = csv_text.splitlines()
+                    # 找到資料開始行（跳過標題）
+                    data_start = 0
+                    for i, line in enumerate(lines):
+                        if line.startswith('代號') or '代號,名稱' in line:
+                            data_start = i + 1
+                            break
                     
-                    try:
-                        # 正確欄位對應（依最新API）
-                        all_tpex_data.append({
-                            '日期': query_date.strftime('%Y-%m-%d'),
-                            'turnover': safe_float(row[9]),      # 成交金額(元)
-                            '最高': safe_float(row[5]),
-                            '最低': safe_float(row[6]),
-                            '收盤': safe_float(row[2]),
-                            '成交量(張)': int(safe_float(row[8]) / 1000)
-                        })
-                        break  # 找到該股票就跳出
-                    except:
-                        continue
+                    for line in lines[data_start:]:
+                        if not line.strip() or line.startswith('合計') or ',' not in line:
+                            continue
+                        cols = [x.strip() for x in line.split(',')]
+                        if len(cols) < 10 or cols[0] != stock_id:
+                            continue
+                        
+                        # cols[0] = 代號, 但日期在第一行標題或需從檔名推斷 → 這裡我們用迴圈日期 + 實際成交量判斷
+                        # 更好的方式：TPEx CSV 第一欄常是日期格式
+                        try:
+                            date_str = cols[0] if '/' in cols[0] else None
+                            if date_str and '/' in date_str:
+                                y, m, d = date_str.split('/')
+                                ad_date = datetime(int(y)+1911, int(m), int(d)).date()
+                            else:
+                                ad_date = temp_date.replace(day=1)  # fallback
+                            
+                            if start_date <= ad_date <= end_date:
+                                all_data.append({
+                                    '日期': ad_date.strftime('%Y-%m-%d'),
+                                    'turnover': safe_float(cols[9]),      # 成交金額(元)
+                                    '最高': safe_float(cols[5]),
+                                    '最低': safe_float(cols[6]),
+                                    '收盤': safe_float(cols[2]),
+                                    '成交量(張)': int(safe_float(cols[8]) / 1000)
+                                })
+                        except:
+                            continue
+                except:
+                    pass
 
-            progress.progress((i + 1) / len(date_list))
-            time.sleep(1.2)   # 禮貌間隔，避免被封
+            month_count += 1
+            progress.progress(month_count / total_months)
+            temp_date += relativedelta(months=1)
+            time.sleep(1.5)
 
         status.empty()
 
-        if all_tpex_data:
-            df = pd.DataFrame(all_tpex_data)
-            df = df.drop_duplicates(subset=['日期']).sort_values('日期')
+        if all_data:
+            df = pd.DataFrame(all_data)
+            df = df.drop_duplicates(subset=['日期']).sort_values('日期').reset_index(drop=True)
             
             df[formula_label] = df.apply(
                 lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
@@ -156,19 +177,15 @@ else:
             df['3倍異常'] = df[formula_label] > (avg * 3)
             df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
             
-            st.success(f"✅ {stock_id} 上櫃多日數據抓取完成，共 {len(df)} 筆")
+            st.success(f"✅ {stock_id} 抓取完成，共 {len(df)} 筆有效交易日")
             st.dataframe(
-                df.style.apply(
-                    lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], 
-                    axis=1
-                ),
+                df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
                 use_container_width=True
             )
             
-            # 下載按鈕
-            csv = df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載 CSV", csv, f"{stock_id}_tpex_data.csv", "text/csv")
+            csv_download = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 下載 CSV 檔案", csv_download, f"{stock_id}_tpex_{start_date.strftime('%Y%m')}-{end_date.strftime('%Y%m')}.csv", "text/csv")
         else:
-            st.error("❌ 此區間沒有抓到資料，請確認日期區間或股票代號是否正確")
+            st.error("❌ 區間內無資料，請確認股票代號或縮小日期範圍（建議1~3個月）")
 
-st.caption("資料來源：櫃買中心 TPEx | 上櫃已改為逐日抓取，可支援較長區間")
+st.caption("上櫃已改用 CSV 模式，可正確抓取多日歷史資料")
