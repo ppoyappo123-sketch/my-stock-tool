@@ -29,7 +29,7 @@ def safe_float(val):
 
 # ====================== 介面 ======================
 st.set_page_config(page_title="台股工具", layout="wide")
-st.title("📉 上櫃個股分析 (欄位自動偵測版)")
+st.title("📉 上櫃個股分析 (最終正確版)")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -65,22 +65,20 @@ if st.button("🔍 開始抓取"):
                 
                 df_month = pd.read_csv(StringIO(clean_csv), thousands=',', encoding='utf-8-sig', on_bad_lines='skip')
                 
-                debug_info.append(f"{roc_year}/{month_str} → 共有 {len(df_month)} 列")
-                
-                # === 自動偵測股票代號在哪一欄 ===
-                stock_col_index = None
-                for idx, col in enumerate(df_month.columns[:5]):
+                # 自動找股票欄位
+                stock_col = None
+                for idx in range(min(5, len(df_month.columns))):
                     if df_month.iloc[:, idx].astype(str).str.contains(stock_id, na=False).any():
-                        stock_col_index = idx
-                        debug_info.append(f"找到股票代號在第 {idx} 欄")
+                        stock_col = idx
+                        debug_info.append(f"{roc_year}/{month_str} → 股票在第 {idx} 欄")
                         break
                 
-                if stock_col_index is not None:
-                    # 過濾該股票
-                    stock_rows = df_month[df_month.iloc[:, stock_col_index].astype(str).str.contains(stock_id)]
+                if stock_col is not None:
+                    stock_rows = df_month[df_month.iloc[:, stock_col].astype(str).str.contains(stock_id)]
                     
                     for _, row in stock_rows.iterrows():
                         try:
+                            # 日期通常在第 0 欄（即使股票也在第 0 欄也會正確處理）
                             date_str = str(row.iloc[0]).strip()
                             if '/' in date_str:
                                 y, m, d = map(int, date_str.split('/'))
@@ -98,10 +96,9 @@ if st.button("🔍 開始抓取"):
                         except:
                             continue
                     
-                    debug_info.append(f"  └─ 找到 {len(stock_rows)} 筆 {stock_id} 資料")
+                    debug_info.append(f"  └─ ✅ 找到 {len(stock_rows)} 筆 {stock_id} 資料")
                 else:
-                    debug_info.append("  └─ 找不到股票代號欄位")
-                    
+                    debug_info.append(f"  └─ 未找到 {stock_id}")
             except Exception as e:
                 debug_info.append(f"解析錯誤: {e}")
         
@@ -129,9 +126,12 @@ if st.button("🔍 開始抓取"):
         df['3倍異常'] = df[formula_label] > (avg * 3)
         df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
         
-        st.success(f"✅ 成功抓取 {len(df)} 筆資料！")
+        st.success(f"🎉 成功抓取 {len(df)} 筆不同日期資料！")
         st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+        
+        csv = df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下載 CSV", csv, f"{stock_id}_tpex.csv", "text/csv")
     else:
-        st.error("❌ 還是沒有抓到，請把上方除錯資訊完整展開給我看")
+        st.error("❌ 還是沒有資料，請把上方除錯資訊完整展開給我看")
 
-st.caption("自動偵測股票欄位版本")
+st.caption("已針對第 0 欄股票 + 日期解析優化")
