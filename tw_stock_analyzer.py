@@ -14,8 +14,8 @@ def safe_float(val):
     try: return float(val)
     except: return 0.0
 
-def fetch_json_urllib(url, referer):
-    """ 使用底層 urllib 繞過攔截 """
+def fetch_json(url, referer="https://www.google.com/"):
+    """ 統一底層抓取邏輯，模擬瀏覽器行為 """
     try:
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
@@ -28,100 +28,103 @@ def fetch_json_urllib(url, referer):
     except Exception as e:
         return {"error": str(e)}
 
-# --- Streamlit UI 設置 ---
-st.set_page_config(page_title="台股全能分析系統", layout="wide")
+# --- Streamlit 介面設置 ---
+st.set_page_config(page_title="台股分析工具", layout="wide")
 
-st.sidebar.header("📊 功能導航")
-mode = st.sidebar.radio(
-    "請選擇功能",
-    ["市場大盤分析", "櫃買個股分析 (強效版)", "上市個股分析 (證交所)"]
+# 側邊欄導覽
+st.sidebar.header("📈 功能選單")
+mode = st.sidebar.selectbox(
+    "請選擇查詢項目",
+    ["市場大盤走勢", "上市個股分析 (證交所)", "上櫃個股分析 (櫃買中心)"]
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
 
-# --- 1. 市場大盤分析 ---
-if mode == "市場大盤分析":
-    st.title("📈 市場大盤走勢分析")
-    days = st.slider("查詢天數", 10, 60, 30)
+# --- 1. 市場大盤走勢 ---
+if mode == "市場大盤走勢":
+    st.title("📊 市場大盤分析")
+    days = st.slider("顯示最近天數", 10, 100, 30)
     
-    if st.button("🚀 抓取大盤數據"):
-        # A. 抓取上市大盤 (證交所)
-        st.subheader("上市加權指數 (TWSE)")
+    if st.button("更新大盤數據"):
+        # 上市大盤
+        st.subheader("上市加權指數")
         tw_url = f"https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?response=json&_={int(time.time()*1000)}"
-        tw_data = fetch_json_urllib(tw_url, "https://www.twse.com.tw/")
-        
+        tw_data = fetch_json(tw_url, "https://www.twse.com.tw/")
         if "data" in tw_data:
             df_tw = pd.DataFrame(tw_data["data"], columns=["日期", "開盤", "最高", "最低", "收盤"])
             df_tw["收盤"] = df_tw["收盤"].apply(safe_float)
             st.line_chart(df_tw.set_index("日期")["收盤"].tail(days))
-            st.dataframe(df_tw.tail(10), use_container_width=True)
+            st.dataframe(df_tw.tail(15), use_container_width=True)
             
-        # B. 抓取上櫃大盤 (櫃買中心)
-        st.subheader("上櫃收盤指數 (TPEx)")
-        tpex_index_url = f"https://www.tpex.org.tw/web/stock/iwd_index/index_summary/index_summary_result.php?l=zh-tw&_={int(time.time()*1000)}"
-        tpex_data = fetch_json_urllib(tpex_index_url, "https://www.tpex.org.tw/zh-tw/mainboard/index/summary.html")
-        
+        # 上櫃大盤
+        st.subheader("上櫃指數")
+        tpex_url = f"https://www.tpex.org.tw/web/stock/iwd_index/index_summary/index_summary_result.php?l=zh-tw&_={int(time.time()*1000)}"
+        tpex_data = fetch_json(tpex_url, "https://www.tpex.org.tw/")
         if "aaData" in tpex_data:
             df_tpex = pd.DataFrame(tpex_data["aaData"])
-            df_tpex = df_tpex[[0, 1]].rename(columns={0: "日期", 1: "收盤指數"})
-            df_tpex["收盤指數"] = df_tpex["收盤指數"].apply(safe_float)
-            st.line_chart(df_tpex.set_index("日期")["收盤指數"].tail(days))
-            st.dataframe(df_tpex.tail(10), use_container_width=True)
+            df_tpex = df_tpex[[0, 1]].rename(columns={0: "日期", 1: "收盤"})
+            df_tpex["收盤"] = df_tpex["收盤"].apply(safe_float)
+            st.line_chart(df_tpex.set_index("日期")["收盤"].tail(days))
+            st.dataframe(df_tpex.tail(15), use_container_width=True)
 
-# --- 2. 櫃買個股分析 ---
-elif mode == "櫃買個股分析 (強效版)":
-    st.title("📉 櫃買個股分析")
-    col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("股票代號", value="8046")
-    with col2: start_m = st.date_input("開始月份", value=datetime.today() - relativedelta(months=1))
-    with col3: end_d = st.date_input("結束日期", value=datetime.today())
+# --- 2. 上市個股分析 ---
+elif mode == "上市個股分析 (證交所)":
+    st.title("🏛️ 上市個股日成交資訊")
+    col1, col2 = st.columns(2)
+    with col1: stock_id = st.text_input("股票代號", value="2330")
+    with col2: query_date = st.date_input("查詢月份", value=datetime.today())
 
-    if st.button("🔍 開始分析"):
-        data_list = []
-        curr = start_m.replace(day=1)
-        months = []
-        while curr <= end_d.replace(day=1):
-            months.append(curr)
-            curr += relativedelta(months=1)
-
-        progress = st.progress(0)
-        for i, m_date in enumerate(months):
-            roc_year = m_date.year - 1911
-            query_date = f"{roc_year}/{m_date.strftime('%m')}/01"
-            url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/stk_quote_result.php?l=zh-tw&d={query_date}&stk_code={stock_id}"
-            
-            res = fetch_json_urllib(url, "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html")
-            
-            if "aaData" in res:
-                for r in res["aaData"]:
-                    data_list.append({
-                        '日期': r[0], '金額': safe_float(r[2]), '最高': safe_float(r[4]),
-                        '最低': safe_float(r[5]), '收盤': safe_float(r[6]), '張數': int(safe_float(r[1]))
-                    })
-            time.sleep(random.uniform(2.5, 3.5))
-            progress.progress((i + 1) / len(months))
-
-        if data_list:
-            df = pd.DataFrame(data_list)
-            df[formula_label] = df.apply(lambda r: (r['金額'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
-            avg = df[formula_label].mean()
-            df['3倍異常'] = df[formula_label] > (avg * 3)
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
-
-# --- 3. 上市個股分析 ---
-else:
-    st.title("🏛️ 上市個股分析 (證交所)")
-    col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("上市代號", value="2330")
-    with col2: start_m = st.date_input("開始日期", value=datetime.today() - relativedelta(months=1))
-    
-    if st.button("🔍 執行上市分析"):
-        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={start_m.strftime('%Y%m%d')}&stockNo={stock_id}"
-        res = fetch_json_urllib(url, "https://www.twse.com.tw/")
+    if st.button("執行上市查詢"):
+        date_str = query_date.strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={date_str}&stockNo={stock_id}"
+        res = fetch_json(url, "https://www.twse.com.tw/")
+        
         if "data" in res:
             df = pd.DataFrame(res["data"], columns=["日期", "成交股數", "成交金額", "開盤", "最高", "最低", "收盤", "漲跌", "成交筆數"])
             df["金額"] = df["成交金額"].apply(safe_float)
             df["最高"] = df["最高"].apply(safe_float)
             df["最低"] = df["最低"].apply(safe_float)
+            
             df[formula_label] = df.apply(lambda r: (r['金額'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
-            st.dataframe(df, use_container_width=True)
+            avg_val = df[formula_label].mean()
+            df['3倍異常'] = df[formula_label] > (avg_val * 3)
+            
+            st.success(f"✅ 已取得 {stock_id} 當月數據")
+            st.dataframe(df.style.apply(lambda r: ['background-color: #ffcccc' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+        else:
+            st.error("查無資料，請確認代號或日期。")
+
+# --- 3. 上櫃個股分析 ---
+else:
+    st.title("📉 上櫃個股日成交資訊")
+    col1, col2 = st.columns(2)
+    with col1: stock_id = st.text_input("股票代號", value="8046")
+    with col2: query_month = st.date_input("查詢月份", value=datetime.today())
+
+    if st.button("執行上櫃查詢"):
+        # 轉換民國年
+        roc_year = query_month.year - 1911
+        roc_date_str = f"{roc_year}/{query_month.strftime('%m')}/01"
+        
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/stk_quote_result.php?l=zh-tw&d={roc_date_str}&stk_code={stock_id}"
+        
+        # 顯示進度
+        with st.spinner('正在與櫃買中心通訊中...'):
+            res = fetch_json(url, "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html")
+            
+        if "aaData" in res:
+            # 櫃買欄位: 0日期, 1張數, 2金額, 3開盤, 4最高, 5最低, 6收盤
+            df = pd.DataFrame(res["aaData"])
+            df = df[[0, 2, 4, 5, 6, 1]].rename(columns={0:"日期", 2:"金額", 4:"最高", 5:"最低", 6:"收盤", 1:"張數"})
+            
+            for col in ["金額", "最高", "最低", "收盤", "張數"]:
+                df[col] = df[col].apply(safe_float)
+                
+            df[formula_label] = df.apply(lambda r: (r['金額'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
+            avg_val = df[formula_label].mean()
+            df['3倍異常'] = df[formula_label] > (avg_val * 3)
+            
+            st.success(f"✅ 已取得 {stock_id} 當月數據")
+            st.dataframe(df.style.apply(lambda r: ['background-color: #ffcccc' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+        else:
+            st.error("請求失敗或查無資料。如果持續失敗，可能是您的 IP 被櫃買中心限制，請更換網路環境。")
