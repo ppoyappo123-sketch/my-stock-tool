@@ -55,7 +55,7 @@ st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
     "請選擇分析模式", 
     ["大盤多日數據分析", "上市個股分析 (證交所)", "上櫃個股分析 (櫃買中心)"],
-    key="nav_v10" 
+    key="nav_v11" 
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
@@ -84,7 +84,8 @@ if mode == "大盤多日數據分析":
             status.empty()
             if all_results:
                 df = pd.DataFrame(all_results); avg = df[formula_label].mean(); df['3倍異常'] = df[formula_label] > (avg * 3)
-                st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+                # 套用新版 width='stretch'
+                st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
 
 # --- 5. 模式 B：上市個股分析 (證交所) ---
 elif mode == "上市個股分析 (證交所)":
@@ -102,7 +103,6 @@ elif mode == "上市個股分析 (證交所)":
             data = fetch_json(url)
             if data and data.get('stat') == 'OK':
                 for r in data['data']:
-                    # 日期格式過濾 (民國轉西元)
                     d_parts = r[0].split('/')
                     ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
                     if start_month <= ad_date <= end_date:
@@ -113,9 +113,10 @@ elif mode == "上市個股分析 (證交所)":
             df[formula_label] = df.apply(lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
             avg = df[formula_label].mean(); df['3倍異常'] = df[formula_label] > (avg * 3)
             df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+            # 套用新版 width='stretch'
+            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
 
-# --- 6. 模式 C：上櫃個股分析 (改回櫃買中心 TPEx，確保最新) ---
+# --- 6. 模式 C：上櫃個股分析 (櫃買中心) ---
 else:
     st.title("📉 上櫃個股分析 (TPEx 官方即時數據)")
     col1, col2, col3 = st.columns(3)
@@ -127,7 +128,6 @@ else:
         all_tpex_data = []
         temp_date = start_month.replace(day=1)
         while temp_date <= end_date:
-            # 櫃買中心 API 格式：YYY/MM (民國年)
             roc_year = temp_date.year - 1911
             url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/stk_quote_result.php?l=zh-tw&d={roc_year}/{temp_date.strftime('%m')}&stk_no={stock_id}"
             data = fetch_json(url)
@@ -138,11 +138,11 @@ else:
                     if start_month <= ad_date <= end_date:
                         all_tpex_data.append({
                             '日期': ad_date.strftime('%Y-%m-%d'),
-                            'turnover': safe_float(r[2]) * 1000, # 櫃買 API 單位通常是千元
+                            'turnover': safe_float(r[2]) * 1000, 
                             '最高': safe_float(r[4]),
                             '最低': safe_float(r[5]),
                             '收盤': safe_float(r[6]),
-                            '成交量(張)': int(safe_float(r[1])/1) # 櫃買 API 成交股數轉張數
+                            '成交量(張)': int(safe_float(r[1])/1) 
                         })
             temp_date += relativedelta(months=1); time.sleep(2)
         if all_tpex_data:
@@ -151,4 +151,5 @@ else:
             avg = df[formula_label].mean(); df['3倍異常'] = df[formula_label] > (avg * 3)
             df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
             st.success(f"✅ {stock_id} 上櫃數據更新完成 (來源：櫃買中心)")
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+            # 套用新版 width='stretch'
+            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
