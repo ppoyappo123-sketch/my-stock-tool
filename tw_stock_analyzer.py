@@ -43,12 +43,12 @@ st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
     "請選擇分析模式",
     ["大盤多日數據分析", "上市個股分析 (證交所)", "上櫃個股分析 (櫃買中心)"],
-    key="nav_v18"
+    key="nav_v19"
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
 
-# ====================== 上櫃個股分析（最終強化版） ======================
+# ====================== 上櫃個股分析（官方頁面對應版） ======================
 if mode == "上櫃個股分析 (櫃買中心)":
     st.title("📉 上櫃個股分析 (TPEx 櫃買中心) - 多日查詢")
     col1, col2, col3 = st.columns(3)
@@ -73,68 +73,70 @@ if mode == "上櫃個股分析 (櫃買中心)":
             roc_year = temp_date.year - 1911
             month_str = temp_date.strftime('%m')
             
+            # 官方使用的 CSV 路徑
             url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=csv&d={roc_year}/{month_str}&stk_no={stock_id}"
             
             status.write(f"📡 抓取 {stock_id}：{roc_year}年{month_str}月")
             csv_text = fetch_text(url)
             
-            if csv_text:
-                debug_info.append(f"{roc_year}/{month_str} → 抓到 {len(csv_text):,} 字元")
+            if csv_text and len(csv_text) > 500:
+                debug_info.append(f"{roc_year}/{month_str} → 成功抓到 {len(csv_text):,} 字元")
                 try:
-                    lines = csv_text.splitlines()
-                    found_in_month = 0
+                    lines = [line.strip() for line in csv_text.splitlines() if line.strip()]
+                    found = 0
                     
                     for line in lines:
-                        line = line.strip().replace('"', '')
-                        if not line or '合計' in line or line.startswith('代號,名稱') or '證券代號' in line:
+                        if '合計' in line or '證券代號' in line or '代號,名稱' in line:
                             continue
                         
-                        cols = [x.strip() for x in line.split(',')]
-                        if len(cols) < 15:
+                        cols = [x.strip().replace('"', '') for x in line.split(',')]
+                        if len(cols) < 12:
                             continue
                         
-                        # 更寬鬆判斷：只要任何一欄包含股票代號就視為目標
-                        if stock_id not in cols:
+                        # 彈性判斷股票代號（可能在第1或第2欄）
+                        if stock_id not in [cols[0], cols[1] if len(cols)>1 else ""]:
                             continue
                         
                         try:
-                            # 第1欄通常是日期 (115/02/22)
-                            date_str = cols[0]
-                            if '/' in date_str:
-                                y, m, d = map(int, date_str.split('/'))
-                                ad_date = datetime(y + 1911, m, d).date()
+                            # 日期格式：115/04/08
+                            date_parts = cols[0].split('/')
+                            if len(date_parts) == 3:
+                                y = int(date_parts[0]) + 1911
+                                m = int(date_parts[1])
+                                d = int(date_parts[2])
+                                ad_date = datetime(y, m, d).date()
                                 
                                 if start_date <= ad_date <= end_date:
-                                    # 欄位位置（根據最新結構調整）
                                     all_data.append({
                                         '日期': ad_date.strftime('%Y-%m-%d'),
-                                        'turnover': safe_float(cols[10] if len(cols) > 10 else 0),   # 成交金額
+                                        'turnover': safe_float(cols[10] if len(cols) > 10 else cols[9]),  
                                         '最高': safe_float(cols[6] if len(cols) > 6 else 0),
                                         '最低': safe_float(cols[7] if len(cols) > 7 else 0),
                                         '收盤': safe_float(cols[3] if len(cols) > 3 else 0),
                                         '成交量(張)': int(safe_float(cols[9] if len(cols) > 9 else 0) / 1000)
                                     })
-                                    found_in_month += 1
+                                    found += 1
                         except:
                             continue
                     
-                    if found_in_month > 0:
-                        debug_info.append(f"  └─ ✅ 找到 {found_in_month} 筆 {stock_id} 資料")
+                    if found > 0:
+                        debug_info.append(f"  └─ ✅ 找到 {found} 筆資料")
                     else:
-                        debug_info.append(f"  └─ ⚠️ 抓到檔案但沒找到 {stock_id}")
+                        debug_info.append(f"  └─ ⚠️ 有檔案但未找到 {stock_id}")
                 except Exception as e:
-                    debug_info.append(f"  └─ 解析錯誤: {e}")
+                    debug_info.append(f"  └─ 解析失敗: {e}")
             else:
-                debug_info.append(f"{roc_year}/{month_str} → 抓取失敗")
+                debug_info.append(f"{roc_year}/{month_str} → 抓取失敗或內容太少")
 
             month_count += 1
             progress.progress(month_count / total_months)
             temp_date += relativedelta(months=1)
-            time.sleep(1.8)
+            time.sleep(1.6)
 
         status.empty()
 
-        with st.expander("🔍 詳細抓取除錯資訊", expanded=True):
+        # 除錯面板
+        with st.expander("🔍 抓取除錯資訊", expanded=True):
             for msg in debug_info:
                 st.write(msg)
 
@@ -150,7 +152,7 @@ if mode == "上櫃個股分析 (櫃買中心)":
             df['3倍異常'] = df[formula_label] > (avg * 3)
             df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
             
-            st.success(f"🎉 成功！抓到 {len(df)} 筆 {stock_id} 資料")
+            st.success(f"🎉 成功抓到 {len(df)} 筆 {stock_id} 資料！")
             st.dataframe(
                 df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
                 use_container_width=True
@@ -159,10 +161,10 @@ if mode == "上櫃個股分析 (櫃買中心)":
             csv_download = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 下載 CSV", csv_download, f"{stock_id}_tpex.csv", "text/csv")
         else:
-            st.error("❌ 還是沒抓到資料")
-            st.info("請把開始日期改成最近 **30~45 天** 再試一次")
+            st.error("❌ 還是沒有抓到資料")
+            st.info("建議：把開始日期改成最近 **30~45 天** 再試一次")
 
 else:
-    st.info("請選擇上櫃模式")
+    st.info("請選擇「上櫃個股分析 (櫃買中心)」模式")
 
-st.caption("已強化全市場CSV解析 + 寬鬆搜尋股票代號")
+st.caption("資料來源：櫃買中心官方個股日成交資訊頁面")
