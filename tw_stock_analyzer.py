@@ -4,7 +4,6 @@ import requests
 import time
 import ssl
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
 
 # --- 1. 基礎設定 ---
 try:
@@ -40,134 +39,98 @@ def safe_float(val):
         return 0.0
 
 # --- 3. Streamlit 介面 ---
-st.set_page_config(page_title="台股即時分析工具", layout="wide")
+st.set_page_config(page_title="台股逐日分析工具", layout="wide")
 st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
     "請選擇分析模式",
-    ["大盤多日數據分析", "上市個股分析 (證交所)", "上櫃個股分析 (櫃買中心)"],
-    key="nav_v13"
+    ["上櫃個股分析 (每日 API 逐日抓取)", "上市個股分析 (證交所)"],
+    key="nav_v14"
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
 
-# ====================== 大盤分析 (略) ======================
-if mode == "大盤多日數據分析":
-    st.title("🏛️ 大盤數據分析")
-    st.info("大盤功能維持原邏輯")
-
-# ====================== 上市個股分析 (維持原樣) ======================
-elif mode == "上市個股分析 (證交所)":
-    st.title("📈 上市個股分析 (TWSE)")
+if mode == "上櫃個股分析 (每日 API 逐日抓取)":
+    st.title("📉 上櫃個股逐日分析")
+    st.caption("使用每日收盤行情 API，針對日期區間內每一天進行掃描")
+    
     col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("股票代號", value="2330")
-    with col2: start_month = st.date_input("開始月份", value=datetime.today() - relativedelta(months=1))
-    with col3: end_date = st.date_input("結束日期", value=datetime.today())
+    with col1: 
+        stock_id = st.text_input("上櫃代號", value="8046")
+    with col2: 
+        start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=7))
+    with col3: 
+        end_d = st.date_input("結束日期", value=datetime.today())
 
-    if st.button("🚀 開始上市分析"):
-        all_stock_data = []
-        temp_date = start_month.replace(day=1)
-        while temp_date <= end_date:
-            url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
-            data = fetch_json(url)
-            if data and data.get('stat') == 'OK':
-                for r in data['data']:
-                    try:
-                        d_parts = r[0].split('/')
-                        ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
-                        if start_month <= ad_date <= end_date:
-                            all_stock_data.append({
-                                '日期': ad_date.strftime('%Y-%m-%d'),
-                                'turnover': safe_float(r[2]),
-                                '最高': safe_float(r[4]),
-                                '最低': safe_float(r[5]),
-                                '收盤': safe_float(r[6]),
-                                '成交量(張)': int(safe_float(r[1])/1000)
-                            })
-                    except: continue
-            temp_date += relativedelta(months=1)
-            time.sleep(1.5)
-        if all_stock_data:
-            df = pd.DataFrame(all_stock_data)
-            df[formula_label] = df.apply(lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
-            avg = df[formula_label].mean()
-            df['3倍異常'] = df[formula_label] > (avg * 3)
-            df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
-
-# ====================== 上櫃個股分析 (修正完畢) ======================
-else:
-    st.title("📉 上櫃個股分析 (TPEx 櫃買中心)")
-    col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("上櫃代號", value="8046")
-    with col2: start_month = st.date_input("開始月份", value=datetime.today() - relativedelta(months=1))
-    with col3: end_date = st.date_input("結束日期", value=datetime.today())
-
-    if st.button("🔍 開始上櫃分析"):
-        all_tpex_data = []
-        temp_date = start_month.replace(day=1)
-        progress = st.progress(0)
-        status = st.empty()
+    if st.button("🔍 開始逐日抓取"):
+        all_daily_data = []
         
-        # 計算總月份用於進度條
-        total_months = ((end_date.year - start_month.year) * 12 + end_date.month - start_month.month) + 1
-        month_count = 0
-
-        while temp_date <= end_date:
-            roc_year = temp_date.year - 1911
-            month_str = temp_date.strftime('%m')
-            
-            # 使用正確的個股歷史 API (stk_quote_result)
-            url = (f"https://www.tpex.org.tw/web/stock/aftertrading/"
-                   f"daily_trading_info/stk_quote_result.php?"
-                   f"l=zh-tw&d={roc_year}/{month_str}&stk_no={stock_id}")
-            
-            status.write(f"📡 抓取 {stock_id}：{roc_year}年{month_str}月 歷史數據...")
-            data = fetch_json(url)
-            
-            if data and 'aaData' in data:
-                for row in data['aaData']:
-                    try:
-                        # 櫃買中心日期格式為 "113/04/01"
-                        d_parts = row[0].split('/')
-                        ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
-                        
-                        # 嚴格篩選在使用者選擇的範圍內
-                        if start_month <= ad_date <= end_date:
-                            all_tpex_data.append({
-                                '日期': ad_date.strftime('%Y-%m-%d'),
-                                '成交量(張)': int(safe_float(row[1]) / 1000), # 原始數據是「股」
-                                'turnover': safe_float(row[2]) * 1000,       # 原始數據是「千元」
-                                '開盤': safe_float(row[3]),
-                                '最高': safe_float(row[4]),
-                                '最低': safe_float(row[5]),
-                                '收盤': safe_float(row[6]),
-                            })
-                    except: continue
-
-            month_count += 1
-            progress.progress(min(month_count / total_months, 1.0))
-            temp_date += relativedelta(months=1)
-            time.sleep(2.0) # 櫃買中心 API 頻率限制較嚴格，建議設 2 秒
-
-        status.empty()
-
-        if all_tpex_data:
-            df = pd.DataFrame(all_tpex_data)
-            df = df.sort_values('日期').reset_index(drop=True)
-            
-            # 計算公式
-            df[formula_label] = df.apply(
-                lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
-                if (r['最高'] - r['最低']) > 0 else 0, axis=1)
-            
-            avg = df[formula_label].mean()
-            df['3倍異常'] = df[formula_label] > (avg * 3)
-            df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
-            
-            st.success(f"✅ {stock_id} 分析完成，共 {len(df)} 筆交易日")
-            st.dataframe(
-                df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
-                width='stretch'
-            )
+        # 產生日期清單 (排除週六日)
+        current_date = start_d
+        target_dates = []
+        while current_date <= end_d:
+            if current_date.weekday() < 5:  # 0-4 是週一到週五
+                target_dates.append(current_date)
+            current_date += timedelta(days=1)
+        
+        if not target_dates:
+            st.warning("選擇的區間內沒有交易日。")
         else:
-            st.error("❌ 無法取得數據。請檢查股票代號是否為「上櫃個股」，或稍後再試。")
+            progress = st.progress(0)
+            status = st.empty()
+            
+            for i, date_obj in enumerate(target_dates):
+                roc_year = date_obj.year - 1911
+                date_str = f"{roc_year}/{date_obj.strftime('%m/%d')}"
+                
+                # 你原本使用的「每日收盤行情」API
+                url = (f"https://www.tpex.org.tw/web/stock/aftertrading/"
+                       f"daily_close_quotes/stk_quote_result.php?"
+                       f"l=zh-tw&o=json&d={date_str}&stk_no={stock_id}")
+                
+                status.write(f"📡 正在抓取：{date_obj.strftime('%Y-%m-%d')} ...")
+                data = fetch_json(url)
+                
+                if data and 'tables' in data and data['tables']:
+                    # 該 API 的 tables[0] 通常是主要資料
+                    for row in data['tables'][0].get('data', []):
+                        # 檢查代號是否正確 (通常 row[0] 是代號)
+                        if str(row[0]).strip() == stock_id:
+                            all_daily_data.append({
+                                '日期': date_obj.strftime('%Y-%m-%d'),
+                                '收盤': safe_float(row[2]),
+                                '最高': safe_float(row[5]),
+                                '最低': safe_float(row[6]),
+                                '成交量(張)': int(safe_float(row[8]) / 1000),
+                                'turnover': safe_float(row[9]),  # 成交金額(元)
+                            })
+                            break # 找到該個股就跳出，換下一天
+                
+                # 更新進度
+                progress.progress((i + 1) / len(target_dates))
+                # 為了避免被封鎖，逐日抓取必須有延遲
+                time.sleep(1.2)
+            
+            status.empty()
+
+            if all_daily_data:
+                df = pd.DataFrame(all_daily_data)
+                
+                # 計算你的公式
+                df[formula_label] = df.apply(
+                    lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
+                    if (r['最高'] - r['最低']) > 0 else 0, axis=1)
+                
+                avg = df[formula_label].mean()
+                df['3倍異常'] = df[formula_label] > (avg * 3)
+                df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
+                
+                st.success(f"✅ 完成！共抓取 {len(df)} 個交易日的資料。")
+                st.dataframe(
+                    df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
+                    width='stretch'
+                )
+            else:
+                st.error("❌ 區間內未抓到任何資料。請確認代號是否正確，或當日是否為休市。")
+
+else:
+    st.info("上市個股功能請參考先前版本。")
