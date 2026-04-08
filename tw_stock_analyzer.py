@@ -27,9 +27,9 @@ def safe_float(val):
     try: return float(val)
     except: return 0.0
 
-# ====================== 主介面 ======================
+# ====================== 介面 ======================
 st.set_page_config(page_title="台股工具", layout="wide")
-st.title("📉 上櫃個股分析 (官方月資料修正版)")
+st.title("📉 上櫃個股分析 (欄位自動偵測版)")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -55,54 +55,64 @@ if st.button("🔍 開始抓取"):
         
         url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=csv&d={roc_year}/{month_str}"
         
-        status.write(f"📡 抓取 {roc_year}年{month_str}月 ...")
+        status.write(f"📡 抓取 {roc_year}年{month_str}月...")
         csv_text = fetch_text(url)
         
         if csv_text and len(csv_text) > 5000:
             try:
-                # 重要修正：跳過前兩行標題
                 lines = csv_text.splitlines()
-                clean_csv = "\n".join(lines[2:])   # 跳過前2行
+                clean_csv = "\n".join(lines[2:])   # 跳過前兩行標題
                 
                 df_month = pd.read_csv(StringIO(clean_csv), thousands=',', encoding='utf-8-sig', on_bad_lines='skip')
                 
-                debug_info.append(f"{roc_year}/{month_str} → 成功解析，共有 {len(df_month)} 列")
+                debug_info.append(f"{roc_year}/{month_str} → 共有 {len(df_month)} 列")
                 
-                # 找目標股票（通常股票代號在第1或第2欄）
-                for _, row in df_month.iterrows():
-                    try:
-                        # 日期在第0欄，股票代號通常在第1欄
-                        date_str = str(row.iloc[0]).strip()
-                        stock_code = str(row.iloc[1]).strip() if len(row) > 1 else ""
-                        
-                        if '/' in date_str and stock_code == stock_id:
-                            y, m, d = map(int, date_str.split('/'))
-                            ad_date = datetime(y + 1911, m, d).date()
-                            
-                            if start_d <= ad_date <= end_d:
-                                all_data.append({
-                                    '日期': ad_date.strftime('%Y-%m-%d'),
-                                    '收盤': safe_float(row.iloc[3]),
-                                    '最高': safe_float(row.iloc[6]),
-                                    '最低': safe_float(row.iloc[7]),
-                                    '成交量(張)': int(safe_float(row.iloc[9]) / 1000),
-                                    'turnover': safe_float(row.iloc[10]),
-                                })
-                    except:
-                        continue
+                # === 自動偵測股票代號在哪一欄 ===
+                stock_col_index = None
+                for idx, col in enumerate(df_month.columns[:5]):
+                    if df_month.iloc[:, idx].astype(str).str.contains(stock_id, na=False).any():
+                        stock_col_index = idx
+                        debug_info.append(f"找到股票代號在第 {idx} 欄")
+                        break
+                
+                if stock_col_index is not None:
+                    # 過濾該股票
+                    stock_rows = df_month[df_month.iloc[:, stock_col_index].astype(str).str.contains(stock_id)]
+                    
+                    for _, row in stock_rows.iterrows():
+                        try:
+                            date_str = str(row.iloc[0]).strip()
+                            if '/' in date_str:
+                                y, m, d = map(int, date_str.split('/'))
+                                ad_date = datetime(y + 1911, m, d).date()
+                                
+                                if start_d <= ad_date <= end_d:
+                                    all_data.append({
+                                        '日期': ad_date.strftime('%Y-%m-%d'),
+                                        '收盤': safe_float(row.iloc[3]),
+                                        '最高': safe_float(row.iloc[6]),
+                                        '最低': safe_float(row.iloc[7]),
+                                        '成交量(張)': int(safe_float(row.iloc[9]) / 1000),
+                                        'turnover': safe_float(row.iloc[10]),
+                                    })
+                        except:
+                            continue
+                    
+                    debug_info.append(f"  └─ 找到 {len(stock_rows)} 筆 {stock_id} 資料")
+                else:
+                    debug_info.append("  └─ 找不到股票代號欄位")
+                    
             except Exception as e:
                 debug_info.append(f"解析錯誤: {e}")
-        else:
-            debug_info.append(f"{roc_year}/{month_str} → 抓取失敗")
-
+        
         month_count += 1
         progress.progress(month_count / total_months)
         temp_date += relativedelta(months=1)
-        time.sleep(1.6)
+        time.sleep(1.5)
 
     status.empty()
 
-    with st.expander("🔍 除錯資訊"):
+    with st.expander("🔍 除錯資訊", expanded=True):
         for msg in debug_info:
             st.write(msg)
 
@@ -121,10 +131,7 @@ if st.button("🔍 開始抓取"):
         
         st.success(f"✅ 成功抓取 {len(df)} 筆資料！")
         st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
-        
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載 CSV", csv, f"{stock_id}.csv", "text/csv")
     else:
-        st.error("❌ 還是沒有抓到資料，請把除錯資訊展開給我看")
+        st.error("❌ 還是沒有抓到，請把上方除錯資訊完整展開給我看")
 
-st.caption("已修正跳過標題行版本")
+st.caption("自動偵測股票欄位版本")
