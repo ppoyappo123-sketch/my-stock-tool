@@ -3,97 +3,83 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from io import StringIO
 
+# ====================== 基礎設定 ======================
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Referer': 'https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html'
 }
 
-def fetch_text(url):
+def fetch_json(url):
     try:
-        res = requests.get(url, headers=HEADERS, verify=False, timeout=20)
+        # 強力防快取
+        url = f"{url}&_={int(time.time() * 1000000)}"
+        res = requests.get(url, headers=HEADERS, verify=False, timeout=15)
         if res.status_code == 200:
-            return res.text
+            return res.json()
     except:
-        return None
+        pass
     return None
 
 def safe_float(val):
     if isinstance(val, (int, float)): return float(val)
     if isinstance(val, str):
-        val = val.replace(',', '').replace('--', '0').replace('"', '').strip()
+        val = val.replace(',', '').replace('--', '0').strip()
     try: return float(val)
     except: return 0.0
 
-# ====================== 主程式 ======================
+# ====================== Streamlit ======================
 st.set_page_config(page_title="台股工具", layout="wide")
-st.title("📉 上櫃個股分析 (最終正確版)")
+st.title("📉 上櫃個股逐日分析 (官方 daily JSON 版)")
 
 col1, col2, col3 = st.columns(3)
 with col1:
     stock_id = st.text_input("上櫃代號", value="6104")
 with col2:
-    start_d = st.date_input("開始日期", value=datetime(2026, 3, 1))
+    start_d = st.date_input("開始日期", value=datetime(2026, 3, 20))
 with col3:
     end_d = st.date_input("結束日期", value=datetime(2026, 4, 8))
 
-if st.button("🔍 開始抓取"):
+formula_label = "成交金額/(最高-最低)/1億"
+
+if st.button("🔍 開始逐日抓取"):
     all_data = []
     progress = st.progress(0)
     status = st.empty()
 
-    temp_date = start_d.replace(day=1)
-    total_months = ((end_d.year - start_d.year) * 12 + end_d.month - start_d.month) + 1
-    month_count = 0
+    # 產生交易日
+    current = start_d
+    target_dates = []
+    while current <= end_d:
+        if current.weekday() < 5:
+            target_dates.append(current)
+        current += timedelta(days=1)
 
-    while temp_date <= end_d:
-        roc_year = temp_date.year - 1911
-        month_str = temp_date.strftime('%m')
-        
-        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=csv&d={roc_year}/{month_str}"
-        
-        status.write(f"📡 抓取 {roc_year}年{month_str}月...")
-        csv_text = fetch_text(url)
-        
-        if csv_text:
-            try:
-                lines = csv_text.splitlines()
-                clean_csv = "\n".join(lines[2:])   # 跳過前兩行標題
-                
-                df_month = pd.read_csv(StringIO(clean_csv), thousands=',', encoding='utf-8-sig', on_bad_lines='skip')
-                
-                # 找出真正的股票 6104（排除權證如 706104）
-                stock_rows = df_month[
-                    (df_month.astype(str).apply(lambda x: x.str.contains('^' + stock_id + '$', regex=True)).any(axis=1))
-                ]
-                
-                for _, row in stock_rows.iterrows():
-                    try:
-                        date_str = str(row.iloc[0]).strip()
-                        if '/' in date_str:
-                            y, m, d = map(int, date_str.split('/'))
-                            ad_date = datetime(y + 1911, m, d).date()
-                            
-                            if start_d <= ad_date <= end_d:
-                                all_data.append({
-                                    '日期': ad_date.strftime('%Y-%m-%d'),
-                                    '收盤': safe_float(row.iloc[2]),   # 修正欄位
-                                    '最高': safe_float(row.iloc[5]),
-                                    '最低': safe_float(row.iloc[6]),
-                                    '成交量(張)': int(safe_float(row.iloc[9]) / 1000),
-                                    'turnover': safe_float(row.iloc[10]),
-                                })
-                    except:
-                        continue
-            except:
-                pass
-        
-        month_count += 1
-        progress.progress(month_count / total_months)
-        temp_date += relativedelta(months=1)
-        time.sleep(1.5)
+    for i, date_obj in enumerate(target_dates):
+        roc_year = date_obj.year - 1911
+        d_str = f"{roc_year:02d}/{date_obj.month:02d}/{date_obj.day:02d}"
+
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={d_str}"
+
+        status.write(f"📡 抓取 {date_obj.strftime('%Y-%m-%d')} ...")
+        data = fetch_json(url)
+
+        if data and 'tables' in data:
+            for table in data['tables']:
+                for row in table.get('data', []):
+                    if len(row) > 10 and str(row[0]).strip() == stock_id:
+                        all_data.append({
+                            '日期': date_obj.strftime('%Y-%m-%d'),
+                            '收盤': safe_float(row[2]),
+                            '最高': safe_float(row[5]),
+                            '最低': safe_float(row[6]),
+                            '成交量(張)': int(safe_float(row[8]) / 1000),
+                            'turnover': safe_float(row[9]),
+                        })
+                        break
+
+        progress.progress((i + 1) / len(target_dates))
+        time.sleep(1.8)   # 拉長間隔減少快取
 
     status.empty()
 
@@ -101,7 +87,6 @@ if st.button("🔍 開始抓取"):
         df = pd.DataFrame(all_data)
         df = df.drop_duplicates(subset=['日期']).sort_values('日期').reset_index(drop=True)
         
-        formula_label = "成交金額/(最高-最低)/1億"
         df[formula_label] = df.apply(
             lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
             if (r['最高'] - r['最低']) > 0 else 0, axis=1)
@@ -110,12 +95,15 @@ if st.button("🔍 開始抓取"):
         df['3倍異常'] = df[formula_label] > (avg * 3)
         df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
         
-        st.success(f"🎉 成功抓取 {len(df)} 筆資料！")
-        st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), use_container_width=True)
+        st.success(f"✅ 抓取完成！共 {len(df)} 筆資料（已去除重複）")
+        st.dataframe(
+            df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
+            use_container_width=True
+        )
         
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載 CSV", csv, f"{stock_id}_tpex.csv", "text/csv")
+        st.download_button("📥 下載 CSV", csv, f"{stock_id}_daily.csv", "text/csv")
     else:
-        st.error("❌ 還是沒有抓到，請告訴我除錯資訊")
+        st.error("❌ 沒有抓到資料，請試試最近 7~14 天區間")
 
-st.caption("已修正為實際欄位：收盤 col2, 最高 col5, 最低 col6, 成交量 col9, 金額 col10")
+st.caption("這是官方頁面實際使用的 daily JSON 方式（你第一個能抓到的版本已優化）")
