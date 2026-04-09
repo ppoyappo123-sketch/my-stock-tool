@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import ssl
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -37,14 +36,14 @@ def safe_float(val):
 
 def get_yahoo_stock_data(stock_id, start_date, end_date):
     """使用 Yahoo Finance 抓取上櫃個股歷史資料"""
-    ticker = f"{stock_id}.TWO"
+    ticker = f"{stock_id}.TWO"   # 上櫃股 ticker 格式
     start_ts = int(time.mktime(start_date.timetuple()))
     end_ts = int(time.mktime(end_date.timetuple())) + 86400
     
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start_ts}&period2={end_ts}&interval=1d"
     
     try:
-        res = requests.get(url, headers=HEADERS, timeout=20).json()
+        res = requests.get(url, headers=HEADERS, timeout=15).json()
         result = res['chart']['result'][0]
         timestamps = result['timestamp']
         quotes = result['indicators']['quote'][0]
@@ -52,24 +51,18 @@ def get_yahoo_stock_data(stock_id, start_date, end_date):
         data = []
         for i, ts in enumerate(timestamps):
             date = datetime.fromtimestamp(ts).date()
-            if start_date.date() <= date <= end_date.date():
-                high = safe_float(quotes['high'][i])
-                low = safe_float(quotes['low'][i])
-                close = safe_float(quotes['close'][i])
-                volume = safe_float(quotes['volume'][i])
-                
-                if high > 0 and low > 0:  # 過濾無效資料
-                    data.append({
-                        '日期': date.strftime('%Y-%m-%d'),
-                        '開盤': safe_float(quotes['open'][i]),
-                        '最高': high,
-                        '最低': low,
-                        '收盤': close,
-                        '成交量(張)': int(volume / 1000),
-                        'turnover': close * volume,   # 估計成交金額
-                    })
+            if start_date <= date <= end_date:
+                data.append({
+                    '日期': date.strftime('%Y-%m-%d'),
+                    '開盤': safe_float(quotes['open'][i]),
+                    '最高': safe_float(quotes['high'][i]),
+                    '最低': safe_float(quotes['low'][i]),
+                    '收盤': safe_float(quotes['close'][i]),
+                    '成交量(張)': int(safe_float(quotes['volume'][i]) / 1000),
+                    'turnover': safe_float(quotes['close'][i]) * safe_float(quotes['volume'][i])   # 估計成交金額
+                })
         return data
-    except Exception as e:
+    except:
         return None
 
 # ====================== Streamlit ======================
@@ -78,30 +71,45 @@ st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
     "請選擇分析模式",
     ["大盤多日數據分析", "上市個股分析 (證交所)", "上櫃個股分析 (Yahoo Finance)"],
-    key="nav_yahoo_v3"
+    key="nav_final"
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
 
-# ====================== 上櫃模式 (Yahoo Finance) ======================
-if mode == "上櫃個股分析 (Yahoo Finance)":
+# ====================== 1. 大盤模式 ======================
+if mode == "大盤多日數據分析":
+    # （保留你原本的大盤功能）
+    st.title("🏛️ 大盤數據分析")
+    # ... 你原本的大盤程式碼可貼在這裡 ...
+
+# ====================== 2. 上市模式 ======================
+elif mode == "上市個股分析 (證交所)":
+    # （保留你原本的上市功能）
+    st.title("📈 上市個股分析 (TWSE)")
+    # ... 你原本的上市程式碼可貼在這裡 ...
+
+# ====================== 3. 上櫃模式（改用 Yahoo Finance） ======================
+else:
     st.title("📉 上櫃個股分析 (Yahoo Finance)")
     col1, col2, col3 = st.columns(3)
     with col1:
         stock_id = st.text_input("上櫃代號", value="6104")
     with col2:
-        start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=45))
+        start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=60))
     with col3:
         end_d = st.date_input("結束日期", value=datetime.today())
 
     if st.button("🔍 開始 Yahoo Finance 抓取"):
-        with st.spinner(f"正在從 Yahoo Finance 抓取 {stock_id}.TWO 資料..."):
-            data = get_yahoo_stock_data(stock_id, start_d, end_d)
+        status = st.empty()
+        status.write("📡 正在從 Yahoo Finance 抓取資料...")
         
-        if data and len(data) > 0:
+        data = get_yahoo_stock_data(stock_id, start_d, end_d)
+        
+        if data:
             df = pd.DataFrame(data)
             df = df.sort_values('日期').reset_index(drop=True)
             
+            # 計算公式
             df[formula_label] = df.apply(
                 lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
                 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
@@ -119,16 +127,8 @@ if mode == "上櫃個股分析 (Yahoo Finance)":
             csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 下載 CSV", csv, f"{stock_id}_yahoo.csv", "text/csv")
         else:
-            st.error(f"❌ 無法抓取 {stock_id}.TWO 的資料")
-            st.info("建議：\n• 把開始日期改成 **最近 30~45 天**（例如 2026/03/01 ~ 今天）\n• 確認股票代號正確\n• 稍後再試（Yahoo 有時會延遲更新）")
+            st.error("❌ Yahoo Finance 抓取失敗，請確認股票代號正確（例如 6104）")
+        
+        status.empty()
 
-# ====================== 其他模式（保留原本） ======================
-elif mode == "大盤多日數據分析":
-    st.title("🏛️ 大盤數據分析")
-    st.info("大盤功能維持原邏輯，請貼上你原本的大盤程式碼")
-
-elif mode == "上市個股分析 (證交所)":
-    st.title("📈 上市個股分析 (TWSE)")
-    st.info("上市功能維持原邏輯，請貼上你原本的上市程式碼")
-
-st.caption("上櫃模式已改用 Yahoo Finance • 建議使用最近 1~2 個月區間")
+st.caption("上櫃模式已改用 Yahoo Finance（ticker 格式：XXXX.TWO）")
