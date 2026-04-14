@@ -1,4 +1,0 @@
-FinMind
-requests
-pandas
-python-dateutil
