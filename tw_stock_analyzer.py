@@ -2,32 +2,34 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import random
 import ssl
 import urllib3
+import random
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
-from FinMind.data import DataLoader
 
-# --- 1. 基礎安全性設定 ---
+# --- 1. 基礎安全性與環境檢查 ---
 try:
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except:
     pass
 
+# 嘗試匯入 FinMind (用於上櫃模式)
+try:
+    from FinMind.data import DataLoader
+    FINMIND_AVAILABLE = True
+    dl = DataLoader()
+except ImportError:
+    FINMIND_AVAILABLE = False
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Referer': 'https://www.twse.com.tw/'
 }
 
-# 初始化 FinMind 加載器
-dl = DataLoader()
-
-# --- 2. 數據抓取核心函式 ---
-
+# --- 2. 核心工具函式 ---
 def fetch_json(url):
-    """ 通用 JSON 抓取器 (用於上市和大盤) """
     try:
         res = requests.get(url, headers=HEADERS, verify=False, timeout=20)
         if res.status_code == 200: return res.json()
@@ -59,8 +61,8 @@ st.set_page_config(page_title="台股全方位分析工具", layout="wide")
 st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
     "請選擇分析模式", 
-    ["大盤多日數據分析", "上市個股分析 (原版證交所)", "上櫃個股分析 (FinMind引擎)"],
-    key="nav_v15" 
+    ["大盤多日數據分析", "上市個股分析 (原版證交所)", "上櫃個股分析 (FinMind精簡版)"],
+    key="nav_v18" 
 )
 
 formula_label = "成交金額/(最高-最低)/1億"
@@ -82,13 +84,23 @@ if mode == "大盤多日數據分析":
                 y = get_yahoo_indices(d)
                 v = fetch_json(f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d.strftime('%Y%m%d')}")
                 if y and v and v.get('stat') == 'OK':
+                    # 尋找 13:30:00 的數據
                     row = next((r for r in v['data'] if "13:30:00" in r[0]), v['data'][-1])
                     score = (safe_float(row[7])/100 / (y['high'] - y['low'])) if (y['high'] - y['low']) > 0 else 0
-                    all_results.append({'交易日期': d.strftime('%Y-%m-%d'), '加權最高': y['high'], '加權最低': y['low'], '13:30累積金額(百萬)': row[7], formula_label: round(score, 4)})
-                progress.progress((i + 1) / len(date_list)); time.sleep(random.uniform(1.2, 2.0))
+                    all_results.append({
+                        '交易日期': d.strftime('%Y-%m-%d'), 
+                        '加權最高': y['high'], 
+                        '加權最低': y['low'], 
+                        '13:30累積金額(百萬)': row[7], 
+                        formula_label: round(score, 4)
+                    })
+                progress.progress((i + 1) / len(date_list))
+                time.sleep(random.uniform(1.0, 1.5))
             status.empty()
             if all_results:
-                df = pd.DataFrame(all_results); avg = df[formula_label].mean(); df['3倍異常'] = df[formula_label] > (avg * 3)
+                df = pd.DataFrame(all_results)
+                avg = df[formula_label].mean()
+                df['3倍異常'] = df[formula_label] > (avg * 3)
                 st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
 
 # --- 5. 模式 B：上市個股分析 (維持原版證交所邏輯) ---
@@ -107,28 +119,46 @@ elif mode == "上市個股分析 (原版證交所)":
             data = fetch_json(url)
             if data and data.get('stat') == 'OK':
                 for r in data['data']:
-                    d_parts = r[0].split('/')
-                    ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
-                    if start_month <= ad_date <= end_date:
-                        all_stock_data.append({'日期': ad_date.strftime('%Y-%m-%d'), 'turnover': safe_float(r[2]), '最高': safe_float(r[4]), '最低': safe_float(r[5]), '收盤': safe_float(r[6]), '成交量(張)': int(safe_float(r[1])/1000)})
-            temp_date += relativedelta(months=1); time.sleep(2)
+                    try:
+                        d_parts = r[0].split('/')
+                        ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
+                        if start_month <= ad_date <= end_date:
+                            all_stock_data.append({
+                                '日期': ad_date.strftime('%Y-%m-%d'), 
+                                'turnover': safe_float(r[2]), 
+                                '最高': safe_float(r[4]), 
+                                '最低': safe_float(r[5]), 
+                                '收盤': safe_float(r[6])
+                            })
+                    except: continue
+            temp_date += relativedelta(months=1)
+            time.sleep(1.5)
+            
         if all_stock_data:
             df = pd.DataFrame(all_stock_data)
-            df[formula_label] = df.apply(lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 if (r['最高'] - r['最低']) > 0 else 0, axis=1)
-            avg = df[formula_label].mean(); df['3倍異常'] = df[formula_label] > (avg * 3)
             df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
-            st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1), width='stretch')
+            df[formula_label] = df.apply(lambda r: (r['成交金額(億元)'] / (r['最高'] - r['最低'])) if (r['最高'] - r['最低']) > 0 else 0, axis=1).round(4)
+            avg = df[formula_label].mean()
+            df['is_error'] = df[formula_label] > (avg * 3)
+            
+            # 精簡欄位顯示
+            display_df = df[['日期', '最高', '最低', '收盤', '成交金額(億元)', formula_label]]
+            st.dataframe(display_df.style.apply(lambda r: ['color:red;font-weight:bold' if df.loc[r.name, 'is_error'] else '' for _ in r], axis=1), width='stretch')
 
-# --- 6. 模式 C：上櫃個股分析 (變更為 FinMind 引擎，解決重複問題) ---
+# --- 6. 模式 C：上櫃個股分析 (FinMind精簡版) ---
 else:
     st.title("📉 上櫃個股分析 (FinMind 引擎)")
+    if not FINMIND_AVAILABLE:
+        st.error("⚠️ 環境未安裝 FinMind。請確保 requirements.txt 包含 FinMind, tqdm, python-dateutil")
+        st.stop()
+
     col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("上櫃代號", value="8046")
+    with col1: stock_id = st.text_input("上櫃代號", value="6104")
     with col2: start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=30))
     with col3: end_d = st.date_input("結束日期", value=datetime.today())
 
-    if st.button("🔍 執行 FinMind 分析"):
-        with st.spinner('正在從 FinMind 獲取穩定數據...'):
+    if st.button("🔍 執行數據分析"):
+        with st.spinner('FinMind 數據連線中...'):
             df_raw = dl.taiwan_stock_daily(
                 stock_id=stock_id,
                 start_date=start_d.strftime('%Y-%m-%d'),
@@ -136,28 +166,24 @@ else:
             )
         
         if not df_raw.empty:
-            # 轉換為您的分析格式
             df = pd.DataFrame()
             df['日期'] = df_raw['date']
-            df['收盤'] = df_raw['close']
             df['最高'] = df_raw['max']
             df['最低'] = df_raw['min']
-            df['成交量(張)'] = (df_raw['Trading_Volume'] / 1000).astype(int)
-            df['turnover'] = df_raw['Trading_money'] # 原始成交金額(元)
+            df['收盤'] = df_raw['close']
+            df['成交金額(億元)'] = (df_raw['Trading_money'] / 100000000).round(2)
             
-            # 套用公式
             df[formula_label] = df.apply(
-                lambda r: (r['turnover'] / (r['最高'] - r['最低'])) / 100000000 
-                if (r['最高'] - r['最低']) > 0 else 0, axis=1)
+                lambda r: (r['成交金額(億元)'] / (r['最高'] - r['最低'])) 
+                if (r['最高'] - r['最低']) > 0 else 0, axis=1
+            ).round(4)
             
             avg = df[formula_label].mean()
-            df['3倍異常'] = df[formula_label] > (avg * 3)
-            df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
+            df['is_error'] = df[formula_label] > (avg * 3)
             
-            st.success(f"✅ {stock_id} 數據分析完成")
-            st.dataframe(
-                df.style.apply(lambda r: ['color:red;font-weight:bold' if r['3倍異常'] else '' for _ in r], axis=1),
-                width='stretch'
-            )
+            # 顯示精簡欄位
+            display_df = df[['日期', '最高', '最低', '收盤', '成交金額(億元)', formula_label]]
+            st.success(f"✅ {stock_id} 分析完成")
+            st.dataframe(display_df.style.apply(lambda r: ['color:red;font-weight:bold' if df.loc[r.name, 'is_error'] else '' for _ in r], axis=1), width='stretch')
         else:
-            st.error("❌ FinMind 無法取得資料，請檢查代號或日期範圍。")
+            st.error("❌ 查無資料，請檢查代號或日期。")
