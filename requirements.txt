@@ -1,6 +1,7 @@
 streamlit
 twstock
 FinMind
+tqdm
 pandas
 requests
 python-dateutil
