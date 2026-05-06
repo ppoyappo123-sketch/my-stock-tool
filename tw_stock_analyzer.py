@@ -14,17 +14,6 @@ try:
 except:
     pass
 
-# --- FinMind Loader (穩定快取) ---
-@st.cache_resource(show_spinner=False)
-def get_finmind_loader():
-    try:
-        from FinMind.data import DataLoader
-        dl = DataLoader()
-        return dl
-    except Exception as e:
-        st.error(f"FinMind 初始化失敗: {e}")
-        return 
-
 dl = get_finmind_loader()
 
 HEADERS = {
