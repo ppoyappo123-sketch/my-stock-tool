@@ -2,38 +2,50 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import ssl
-import urllib3
-import random
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 基礎安全性設定 ---
+# --- 安全性初始化 ---
 try:
+    import ssl
+    import urllib3
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except:
     pass
 
+# --- FinMind Loader (穩定快取) ---
+@st.cache_resource(show_spinner=False)
+def get_finmind_loader():
+    try:
+        from FinMind.data import DataLoader
+        dl = DataLoader()
+        return dl
+    except Exception as e:
+        st.error(f"FinMind 初始化失敗: {e}")
+        return None
+
+dl = get_finmind_loader()
+
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Referer': 'https://www.twse.com.tw/'
 }
 
-# --- 2. 工具函式 ---
-def fetch_json(url):
-    """ 從證交所抓取 JSON 數據 """
+# --- 共用工具函式 ---
+def fetch_json_safe(url: str):
     try:
-        res = requests.get(url, headers=HEADERS, verify=False, timeout=20)
+        res = requests.get(url, headers=HEADERS, verify=False, timeout=15)
         if res.status_code == 200:
-            return res.json()
+            data = res.json()
+            return data if data and data.get('stat') == 'OK' else None
     except:
-        pass
+        return None
     return None
 
 def safe_float(val):
-    """ 安全轉換數值，處理千分位逗號 """
-    if isinstance(val, (int, float)): return float(val)
+    if isinstance(val, (int, float)):
+        return float(val)
     if isinstance(val, str):
         val = val.replace(',', '').replace('--', '0').strip()
     try:
@@ -41,107 +53,190 @@ def safe_float(val):
     except:
         return 0.0
 
+@st.cache_data(ttl=3600)
 def get_yahoo_indices(query_date):
-    """ 從 Yahoo Finance 抓取大盤當日最高/最低點 """
-    start_ts = int(time.mktime(query_date.timetuple()))
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/^TWII?period1={start_ts}&period2={start_ts + 86400}&interval=1d"
+    ts = int(time.mktime(query_date.timetuple()))
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/^TWII?period1={ts}&period2={ts+86400}&interval=1d"
     try:
         res = requests.get(url, headers=HEADERS, timeout=10).json()
         result = res['chart']['result'][0]
-        high = result['indicators']['quote'][0]['high'][0]
-        low = result['indicators']['quote'][0]['low'][0]
-        return {'high': round(high, 2), 'low': round(low, 2)}
+        return {
+            'high': round(result['indicators']['quote'][0]['high'][0], 2),
+            'low': round(result['indicators']['quote'][0]['low'][0], 2)
+        }
     except:
         return None
 
-# --- 3. Streamlit 介面佈局 ---
-st.set_page_config(page_title="台股分析工具 (穩定版)", layout="wide")
+# --- Streamlit 設定 ---
+st.set_page_config(page_title="台股分析工具 2026", layout="wide")
+st.sidebar.title("🔧 分析模式")
 
-st.sidebar.header("功能選單")
 mode = st.sidebar.selectbox(
-    "請選擇分析模式", 
-    ["大盤多日數據分析", "上市個股分析 (證交所)"],
-    key="nav_stable_v1" 
+    "請選擇分析模式",
+    ["大盤多日數據分析", "上市個股分析 (證交所)", "上櫃個股分析 (FinMind)"],
+    key="main_nav"
 )
 
-formula_label = "成交金額/(最高-最低)/1億"
+formula_label = "成交金額/(高-低)/1億"
 
-# --- 4. 模式 A：大盤分析 (Yahoo + 證交所對位) ---
+# ====================== 大盤分析 ======================
 if mode == "大盤多日數據分析":
-    st.title("🏛️ 大盤數據分析")
+    st.title("🏛️ 大盤多日數據分析 (Yahoo + 證交所)")
     col1, col2 = st.columns(2)
-    with col1: start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=7))
-    with col2: end_d = st.date_input("結束日期", value=datetime.today())
+    with col1:
+        start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=14))
+    with col2:
+        end_d = st.date_input("結束日期", value=datetime.today())
 
-    if st.button("🔍 開始大盤分析"):
+    if st.button("🔍 開始分析", type="primary"):
+        date_list = [start_d + timedelta(days=x) for x in range((end_d - start_d).days + 1)
+                     if (start_d + timedelta(days=x)).weekday() < 5]
+
         all_results = []
-        date_list = [start_d + timedelta(days=x) for x in range((end_d-start_d).days + 1) if (start_d + timedelta(days=x)).weekday() < 5]
-        
-        if date_list:
-            progress = st.progress(0)
-            status = st.empty()
-            for i, d in enumerate(date_list):
-                status.write(f"📡 抓取數據中：{d.strftime('%Y-%m-%d')}")
-                y = get_yahoo_indices(d)
-                v = fetch_json(f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d.strftime('%Y%m%d')}")
-                
-                if y and v and v.get('stat') == 'OK' and 'data' in v:
-                    # 尋找 13:30:00 的數據
-                    row = next((r for r in v['data'] if "13:30:00" in r[0]), v['data'][-1])
-                    score = (safe_float(row[7])/100 / (y['high'] - y['low'])) if (y['high'] - y['low']) > 0 else 0
-                    all_results.append({
-                        '交易日期': d.strftime('%Y-%m-%d'), 
-                        '加權最高': y['high'], 
-                        '加權最低': y['low'], 
-                        '13:30累積金額(百萬)': row[7], 
-                        formula_label: round(score, 4)
-                    })
-                progress.progress((i + 1) / len(date_list))
-                time.sleep(random.uniform(1.2, 2.0)) # 增加延遲避免被鎖 IP
-            
-            status.empty()
-            if all_results:
-                df = pd.DataFrame(all_results)
-                avg = df[formula_label].mean()
-                st.dataframe(df.style.apply(lambda r: ['color:red;font-weight:bold' if r[formula_label] > (avg * 3) else '' for _ in r], axis=1), width='stretch')
+        prog = st.progress(0)
+        msg = st.empty()
 
-# --- 5. 模式 B：上市個股分析 (證交所 API) ---
-elif mode == "上市個股分析 (證交所)":
-    st.title("📈 上市個股分析")
-    col1, col2, col3 = st.columns(3)
-    with col1: stock_id = st.text_input("股票代號", value="2330")
-    with col2: start_month = st.date_input("開始月份", value=datetime.today() - relativedelta(months=1))
-    with col3: end_date = st.date_input("結束日期", value=datetime.today())
+        for i, d in enumerate(date_list):
+            msg.write(f"📡 處理中... {d.strftime('%Y-%m-%d')}")
+            y = get_yahoo_indices(d)
+            v = fetch_json_safe(f"https://www.twse.com.tw/exchangeReport/MI_5MINS?response=json&date={d.strftime('%Y%m%d')}")
 
-    if st.button("🚀 開始上市分析"):
-        all_stock_data = []
-        temp_date = start_month.replace(day=1)
-        while temp_date <= end_date:
-            url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={temp_date.strftime('%Y%m%d')}&stockNo={stock_id}"
-            data = fetch_json(url)
-            if data and data.get('stat') == 'OK' and 'data' in data:
-                for r in data['data']:
-                    try:
-                        d_parts = r[0].split('/')
-                        ad_date = datetime(int(d_parts[0])+1911, int(d_parts[1]), int(d_parts[2])).date()
-                        if start_month <= ad_date <= end_date:
-                            all_stock_data.append({
-                                '日期': ad_date.strftime('%Y-%m-%d'), 
-                                'turnover': safe_float(r[2]), 
-                                '最高': safe_float(r[4]), 
-                                '最低': safe_float(r[5]), 
-                                '收盤': safe_float(r[6])
-                            })
-                    except: continue
-            temp_date += relativedelta(months=1)
-            time.sleep(2)
-            
-        if all_stock_data:
-            df = pd.DataFrame(all_stock_data)
-            df['成交金額(億元)'] = (df['turnover'] / 100000000).round(2)
-            df[formula_label] = df.apply(lambda r: (r['成交金額(億元)'] / (r['最高'] - r['最低'])) if (r['最高'] - r['最低']) > 0 else 0, axis=1).round(4)
+            if y and v and 'data' in v:
+                # 取 13:30 或最後一筆
+                row = next((r for r in v['data'] if "13:30:00" in r[0]), v['data'][-1])
+                high_low = y['high'] - y['low']
+                score = (safe_float(row[7]) / 100 / high_low) if high_low > 0 else 0
+
+                all_results.append({
+                    '日期': d.strftime('%Y-%m-%d'),
+                    '加權最高': y['high'],
+                    '加權最低': y['low'],
+                    '13:30成交金額(億)': round(safe_float(row[7])/100, 2),
+                    formula_label: round(score, 4)
+                })
+
+            prog.progress((i + 1) / len(date_list))
+            time.sleep(1.1)  # 禮貌延遲
+
+        msg.empty()
+
+        if all_results:
+            df = pd.DataFrame(all_results)
             avg = df[formula_label].mean()
-            
-            # 精簡顯示欄位
-            display_df = df[['日期', '最高', '最低', '收盤', '成交金額(億元)', formula_label]]
-            st.dataframe(display_df.style.apply(lambda r: ['color:red;font-weight:bold' if r[formula_label] > (avg * 3) else '' for _ in r], axis=1), width='stretch')
+            st.success(f"✅ 完成！範圍平均指標：**{avg:.4f}**")
+            st.dataframe(
+                df.style.apply(lambda r: ['color:red; font-weight:bold' if r[formula_label] > avg*3 else '' for _ in r], axis=1),
+                use_container_width=True
+            )
+        else:
+            st.warning("無有效數據")
+
+# ====================== 上市個股 ======================
+elif mode == "上市個股分析 (證交所)":
+    st.title("📈 上市個股分析 (證交所)")
+    col1, col2, col3 = st.columns(3)
+    with col1: stock_id = st.text_input("股票代號", value="2330", max_chars=6)
+    with col2: start_m = st.date_input("開始日期", value=datetime.today() - relativedelta(months=3))
+    with col3: end_d = st.date_input("結束日期", value=datetime.today())
+
+    if st.button("🚀 執行抓取", type="primary"):
+        data_list = []
+        curr = start_m.replace(day=1)
+        prog_bar = st.progress(0)
+        count = 0
+
+        while curr <= end_d:
+            res = fetch_json_safe(f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={curr.strftime('%Y%m%d')}&stockNo={stock_id}")
+            if res and 'data' in res:
+                for r in res['data']:
+                    try:
+                        y, m, d = map(int, r[0].split('/'))
+                        ad_date = datetime(y + 1911, m, d).date()
+                        if start_m <= ad_date <= end_d:
+                            high = safe_float(r[4])
+                            low = safe_float(r[5])
+                            amount = safe_float(r[2])
+                            data_list.append({
+                                '日期': ad_date.strftime('%Y-%m-%d'),
+                                '最高': high,
+                                '最低': low,
+                                '收盤': safe_float(r[6]),
+                                '成交金額(億)': round(amount / 100000000, 2),
+                                formula_label: round((amount/100000000) / (high-low), 4) if high != low else 0
+                            })
+                    except:
+                        continue
+            curr += relativedelta(months=1)
+            count += 1
+            prog_bar.progress(min(count / 6, 1.0))  # 粗略進度
+            time.sleep(1.2)
+
+        if data_list:
+            df = pd.DataFrame(data_list)
+            valid = df[df[formula_label] > 0][formula_label]
+            threshold = valid.mean() * 3 if not valid.empty else 0
+
+            st.info(f"📊 平均指標：**{valid.mean():.4f}** | 三倍門檻：**{threshold:.4f}**")
+            st.dataframe(
+                df.style.apply(lambda r: ['color:red; font-weight:bold' if r[formula_label] > threshold else '' for _ in r], axis=1),
+                use_container_width=True
+            )
+        else:
+            st.warning("查無數據，請確認代號與區間")
+
+# ====================== 上櫃個股 ======================
+else:
+    st.title("📉 上櫃個股分析 (FinMind)")
+    if dl is None:
+        st.stop()
+
+    col1, col2, col3 = st.columns(3)
+    with col1: stock_id = st.text_input("上櫃股票代號", value="6104", max_chars=6)
+    with col2: start_d = st.date_input("開始日期", value=datetime.today() - timedelta(days=60))
+    with col3: end_d = st.date_input("結束日期", value=datetime.today())
+
+    if st.button("🔍 執行分析", type="primary"):
+        with st.spinner("正在從 FinMind 取得數據..."):
+            try:
+                raw = dl.taiwan_stock_daily(
+                    stock_id=stock_id,
+                    start_date=start_d.strftime('%Y-%m-%d'),
+                    end_date=end_d.strftime('%Y-%m-%d')
+                )
+
+                if raw is not None and not raw.empty:
+                    df = pd.DataFrame({
+                        '日期': raw['date'],
+                        '最高': raw['max'],
+                        '最低': raw['min'],
+                        '收盤': raw['close'],
+                        '成交金額(億)': (raw['Trading_money'] / 1e8).round(2)
+                    })
+
+                    df[formula_label] = df.apply(
+                        lambda r: r['成交金額(億)'] / (r['最高'] - r['最低'])
+                        if (r['最高'] - r['最低']) > 0 else 0, axis=1
+                    ).round(4)
+
+                    valid = df[df[formula_label] > 0][formula_label]
+                    threshold = valid.mean() * 3 if not valid.empty else 0
+
+                    st.success(f"✅ 取得 {len(df)} 筆數據")
+                    st.info(f"📊 平均指標：**{valid.mean():.4f}** | 三倍警示門檻：**{threshold:.4f}**")
+
+                    st.dataframe(
+                        df.style.apply(
+                            lambda r: ['color:red; font-weight:bold' if r[formula_label] > threshold else '' for _ in r],
+                            axis=1
+                        ),
+                        use_container_width=True
+                    )
+
+                    # 額外圖表
+                    st.line_chart(df.set_index('日期')[['收盤', formula_label]])
+
+                else:
+                    st.warning("查無數據，請確認代號是否為上櫃股")
+            except Exception as e:
+                st.error(f"數據取得失敗：{str(e)}")
+                st.info("💡 建議稍等 10 秒後重試，或檢查網路/FINMind API 狀態")
