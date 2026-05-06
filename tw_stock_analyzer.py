@@ -23,7 +23,7 @@ def get_finmind_loader():
         return dl
     except Exception as e:
         st.error(f"FinMind 初始化失敗: {e}")
-        return None
+        return 
 
 dl = get_finmind_loader()
 
